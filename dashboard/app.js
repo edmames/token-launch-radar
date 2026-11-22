@@ -216,7 +216,7 @@
   return el('section', { class: 'hero' },
   el('div', { class: 'hero-main' },
   el('h1', { text: 'Empirical Pre-Token Valuation Radar' }),
-  el('p', { text: 'Scoring ' + DATA.board_size + ' DeFi protocols (' + DATA.watchlist_size + ' watchlist floor + ' + DATA.early_size + ' early TVL candidates) via multi-factor conditional FDV (M_cat × S × G × A) weighted by public launch probability priors (P_launch). Zero manual overrides.' })
+  el('p', { text: 'Scoring ' + DATA.board_size + ' DeFi protocols (' + DATA.watchlist_size + ' watchlist floor + ' + DATA.early_size + ' early TVL candidates) via multi-factor conditional FDV (M_cat × S × G × A) weighted by public launch probability priors (P_launch). Formula-driven ranking, documented launch priors.' })
   ),
   el('div', { class: 'hero-metrics' },
   el('div', { class: 'metric-card' }, el('div', { class: 'metric-label', text: 'Total Implied Value' }), el('div', { class: 'metric-val', text: fmtUsd(totalImplied) })),
