@@ -27,6 +27,8 @@ import {
   boardIssue,
   buildRadar,
   dataScript,
+} from './lib/board.ts';
+import {
   parseSnapshot,
 } from './lib/model.ts';
 import {
