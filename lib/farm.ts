@@ -73,6 +73,9 @@ export interface RoiResult {
   net_cash_ev_10k: number;
   alpha_circ: number;
   hold_days: number;
+  gas_per_tx: number;
+  bridge_usd: number;
+  tx_count: number;
 }
 
 export function roi(protocol: SnapshotProtocol, implied: number): RoiResult {
@@ -114,7 +117,21 @@ export function roi(protocol: SnapshotProtocol, implied: number): RoiResult {
     net_cash_ev_10k: netCashEv10k,
     alpha_circ: alphaCirc,
     hold_days: hold,
+    gas_per_tx: gas,
+    bridge_usd: bridge,
+    tx_count: tx,
   };
+}
+
+export function stepCosts(r: RoiResult): [string, string, string, string, string] {
+  const total_c = roundJs(r.c_hard * 100);
+  const s1 = roundJs((r.bridge_usd + r.gas_per_tx) * 100);
+  const s2 = roundJs(2 * r.gas_per_tx * 100);
+  let s3 = roundJs((r.tx_count - 5) * r.gas_per_tx * 100);
+  const s5 = roundJs(2 * r.gas_per_tx * 100);
+  s3 += total_c - (s1 + s2 + s3 + s5);
+  const fmt = (c: number) => `$${(c / 100).toFixed(2)}`;
+  return [fmt(s1), fmt(s2), fmt(s3), '$0.00', fmt(s5)];
 }
 
 // ---------------- §2 Nearest Live Comps (k=3) ----------------
@@ -240,7 +257,13 @@ export const SKIP_TEMPLATES: readonly StepTemplate[] = [
 
 export const FARM_STEP1_TEMPLATE: StepTemplate = {
   text: 'Route capital via low-fee rail on {exec}: Bridge {min} in USDC, ETH, or native gas to {exec} using native bridge or CCTP with estimated round-trip hard cost {gas}.',
-  cost: '{gas}',
+  cost: '{g1}',
+  time: '5-10 min',
+};
+
+export const FARM_STEP1_TEMPLATE_ETH: StepTemplate = {
+  text: 'Fund wallet on Ethereum mainnet: prepare {min} in USDC or ETH (round-trip gas+bridge budget {total_hard}).',
+  cost: '{g1}',
   time: '5-10 min',
 };
 
@@ -260,24 +283,24 @@ export const FARM_STEP2_TEMPLATES: readonly string[] = [
 ];
 
 export const FARM_STEP2_META = {
-  cost: '{min} capital, {gas}',
+  cost: '{min} capital, {g2}',
   time: '15 min',
 };
 
 export const FARM_STEP3_TEMPLATES: readonly StepTemplate[] = [
   {
     text: 'Optimize maker-fee & OI tier: use post-only limit orders near mid-spread on {name} to capture fee rebates, build multi-day open interest, and avoid wash-trade filters.',
-    cost: '{gas}',
+    cost: '{g3}',
     time: '10 min',
   },
   {
     text: 'Compound ecosystem multipliers: route {name} LP receipts or bridged balances through verified native gauges/quests on {exec} to stack protocol and chain points.',
-    cost: '{gas}',
+    cost: '{g3}',
     time: '10 min',
   },
   {
     text: 'Stack receipt token for multiplier boost: deploy {name} receipt tokens into approved secondary liquidity venues (Pendle, Kamino Multiply, Morpho) to capture 2x-5x boosted points stacking.',
-    cost: '{gas}',
+    cost: '{g3}',
     time: '10 min',
   },
 ];
@@ -303,17 +326,17 @@ export const FARM_STEP4_TEMPLATES: readonly StepTemplate[] = [
 export const FARM_STEP5_TEMPLATES: readonly StepTemplate[] = [
   {
     text: 'Liquidation & funding-flip exit guard: close hedged legs immediately if 7d net funding turns sustainably negative (>15% APR cost), OI cap dilutes >2x, or spread widens >30 bps.',
-    cost: '{gas}',
+    cost: '{g5}',
     time: '10-15 min',
   },
   {
     text: 'IL & emission exit guard: pull liquidity if 7d impermanent loss exceeds fee APR + estimated points yield, or pool TVL dilutes >2x without matching volume growth.',
-    cost: '{gas}',
+    cost: '{g5}',
     time: '10-15 min',
   },
   {
     text: 'Active risk guard and async exit trigger: monitor withdrawal queues (ERC-7540 unbonding 1-7 days), secondary market peg (>0.5% discount), or TVL dilution >2x; unwind position early if thresholds breach.',
-    cost: '{gas}',
+    cost: '{g5}',
     time: '10-15 min',
   },
 ];
@@ -343,14 +366,32 @@ export function getFarmStep2Variant(category: string | null): number {
 
 export function fillSlot(
   text: string,
-  vars: { name: string; exec: string; min: string; gas: string; hold: string },
+  vars: {
+    name: string;
+    exec: string;
+    min: string;
+    gas: string;
+    hold: string;
+    g1?: string;
+    g2?: string;
+    g3?: string;
+    g4?: string;
+    g5?: string;
+    total_hard?: string;
+  },
 ): string {
   return text
     .replace(/{name}/g, vars.name)
     .replace(/{exec}/g, vars.exec)
     .replace(/{min}/g, vars.min)
     .replace(/{gas}/g, vars.gas)
-    .replace(/{hold}/g, vars.hold);
+    .replace(/{hold}/g, vars.hold)
+    .replace(/{g1}/g, vars.g1 ?? '')
+    .replace(/{g2}/g, vars.g2 ?? '')
+    .replace(/{g3}/g, vars.g3 ?? '')
+    .replace(/{g4}/g, vars.g4 ?? '')
+    .replace(/{g5}/g, vars.g5 ?? '')
+    .replace(/{total_hard}/g, vars.total_hard ?? '');
 }
 
 export function stepText(step: FarmStep): string {
@@ -365,12 +406,19 @@ export function farmSteps(
   verdict: 'farm' | 'watch' | 'skip',
   roiResult: RoiResult,
 ): FarmStep[] {
+  const [s1, s2, s3, s4, s5] = stepCosts(roiResult);
   const vars = {
     name: protocol.name,
     exec: roiResult.exec_chain,
     min: `$${roiResult.k_min.toLocaleString('en-US')}`,
     gas: `$${roiResult.c_hard.toFixed(2)}`,
+    total_hard: `$${roiResult.c_hard.toFixed(2)}`,
     hold: String(roiResult.hold_days),
+    g1: s1,
+    g2: s2,
+    g3: s3,
+    g4: s4,
+    g5: s5,
   };
 
   if (verdict === 'skip') {
@@ -381,17 +429,19 @@ export function farmSteps(
     }));
   }
 
+  const s1Template =
+    roiResult.exec_chain === 'Ethereum' ? FARM_STEP1_TEMPLATE_ETH : FARM_STEP1_TEMPLATE;
   const s2Idx = getFarmStep2Variant(protocol.category);
   const s3Idx = getFarmStepGroup(protocol.category);
-  const s3 = FARM_STEP3_TEMPLATES[s3Idx]!;
-  const s4 = FARM_STEP4_TEMPLATES[s3Idx]!;
-  const s5 = FARM_STEP5_TEMPLATES[s3Idx]!;
+  const s3Template = FARM_STEP3_TEMPLATES[s3Idx]!;
+  const s4Template = FARM_STEP4_TEMPLATES[s3Idx]!;
+  const s5Template = FARM_STEP5_TEMPLATES[s3Idx]!;
 
   return [
     {
-      text: fillSlot(FARM_STEP1_TEMPLATE.text, vars),
-      cost: fillSlot(FARM_STEP1_TEMPLATE.cost, vars),
-      time: FARM_STEP1_TEMPLATE.time,
+      text: fillSlot(s1Template.text, vars),
+      cost: fillSlot(s1Template.cost, vars),
+      time: s1Template.time,
     },
     {
       text: fillSlot(FARM_STEP2_TEMPLATES[s2Idx]!, vars),
@@ -399,19 +449,19 @@ export function farmSteps(
       time: FARM_STEP2_META.time,
     },
     {
-      text: fillSlot(s3.text, vars),
-      cost: fillSlot(s3.cost, vars),
-      time: s3.time,
+      text: fillSlot(s3Template.text, vars),
+      cost: fillSlot(s3Template.cost, vars),
+      time: s3Template.time,
     },
     {
-      text: fillSlot(s4.text, vars),
-      cost: fillSlot(s4.cost, vars),
-      time: s4.time,
+      text: fillSlot(s4Template.text, vars),
+      cost: fillSlot(s4Template.cost, vars),
+      time: s4Template.time,
     },
     {
-      text: fillSlot(s5.text, vars),
-      cost: fillSlot(s5.cost, vars),
-      time: s5.time,
+      text: fillSlot(s5Template.text, vars),
+      cost: fillSlot(s5Template.cost, vars),
+      time: s5Template.time,
     },
   ];
 }
