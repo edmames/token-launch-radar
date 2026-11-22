@@ -1,357 +1,184 @@
 (function(){
 "use strict";
-var DATA=window.RADAR;
-if(!DATA)return;
-window.DATA=DATA;
-var app=document.getElementById("app");
-var state={q:"",category:"all",chain:"all",verdict:"all",hideSkips:false,watchOnly:false,tab:"pre-token",sort:"rank",dir:1,selected:null};
-function getResearchNote(r){
-if(r.verdict==="skip")return "Structural Filter: Disqualified by launch probability filter (P_launch "+r.p_launch.toFixed(3)+" < 0.25) due to B2B architecture, live-token sibling, or non-issuing structure.";
-if(r.verdict==="farm")return "High Conviction: Top-tier launch candidate in "+(r.category||"DeFi")+" with P_launch "+r.p_launch.toFixed(3)+" across "+(r.chains?r.chains.length:1)+" active chains.";
-if(r.ag&&r.ag>730)return "Maturity Decay: Established protocol ("+Math.round(r.ag)+"d old) subject to tokenless age penalty; monitor governance announcements.";
-return "Active Radar: "+(r.category||"DeFi")+" protocol with "+(r.chains&&r.chains.length?r.chains[0]:"EVM")+" footprint; monitor growth and TGE readiness.";
-}
-var LOW_FEE_CHAINS=["Solana","Base","Arbitrum","Monad","Ink","Hyperliquid L1","Optimism","Polygon","Sui","Avalanche","Binance","Starknet"];
-function selectExecChain(chs){
-if(!chs||!chs.length)return "Ethereum";
-for(var i=0;i<LOW_FEE_CHAINS.length;i++){if(chs.indexOf(LOW_FEE_CHAINS[i])>=0)return LOW_FEE_CHAINS[i];}
-return chs[0]||"Ethereum";
-}
+var D=window.RADAR;if(!D)return;
+window.DATA=D;
+var S={q:"",cat:"all",ch:"all",v:"all",noSkip:false,wl:false,tab:"radar",sort:"rank",dir:1,sel:null};
 function getFarmSteps(r){
-var exec=selectExecChain(r.chains);
-var isEth=exec==="Ethereum";
-var txGas=isEth?"$4-$12 gas":"$0.02-$0.15 gas";
-var minCap=isEth?"$5,000+":"$1,000+";
-var name=r.name;
-var hold=String(r.hd!==undefined?r.hd:(r.ag===null||r.ag>365?30:r.ag<180?60:45));
-function sub(s){return s.replace(/{name}/g,name).replace(/{exec}/g,exec).replace(/{min}/g,minCap).replace(/{gas}/g,txGas).replace(/{hold}/g,hold);}
-if(r.verdict==="skip"){
-return DATA.ft.s.map(function(step){return{text:sub(step[0]),cost:sub(step[1]),time:step[2]};});
-}
-var s3Idx=(r.s2===2||r.s2===8)?0:(r.s2===1||r.s2===10)?1:2;
-return DATA.ft.f.map(function(step,i){
-var rawText=Array.isArray(step[0])?(i===1?step[0][r.s2||0]:step[0][s3Idx]):step[0];
-var rawCost=Array.isArray(step[1])?step[1][s3Idx]:step[1];
-var rawTime=Array.isArray(step[2])?step[2][s3Idx]:step[2];
-return{text:sub(rawText),cost:sub(rawCost),time:rawTime};
-});
+  var v={name:r.name,exec:r.exec_chain,min:"$"+r.k_min.toLocaleString("en-US"),gas:"$"+Number(r.c_hard).toFixed(2),hold:String(r.hold_days)};
+  function sub(s){return String(s||"").replace(/{(\w+)}/g,function(_,k){return v[k]||"";});}
+  if(r.verdict==="skip")return D.ft.s.map(function(s){return{text:sub(s[0]),cost:sub(s[1]),time:s[2]};});
+  var g=(r.s2===2||r.s2===8)?0:(r.s2===1||r.s2===10)?1:2,f=D.ft.f;
+  return[
+    {text:sub(f[0][0]),cost:sub(f[0][1]),time:f[0][2]},
+    {text:sub(f[1][0][r.s2]),cost:sub(f[1][0][r.s2]?f[1][1]:f[1][1]),time:f[1][2]},
+    {text:sub(f[2][0][g]),cost:sub(f[2][1]),time:f[2][2]},
+    {text:sub(f[3][0][g]),cost:sub(f[3][1]),time:f[3][2][g]},
+    {text:sub(f[4][0][g]),cost:sub(f[4][1]),time:f[4][2]}
+  ];
 }
 window.getFarmSteps=getFarmSteps;
-function fmtUsd(n){
-if(n===null||n===undefined||!isFinite(n))return "n/a";
-var abs=Math.abs(n);
-if(abs>=1e9)return "$"+(n/1e9).toFixed(3)+"B";
-if(abs>=1e6)return "$"+(n/1e6).toFixed(2)+"M";
-if(abs>=1e3)return "$"+Math.round(n/1e3)+"K";
-return "$"+Math.round(n);
+function stepText(s){
+  var t=s.text+" Cost: "+s.cost+". Time: "+s.time+".";
+  return t.length>600?t.slice(0,596)+"...":t.length<20?t+" Maintain position per protocol schedule.":t;
 }
-function fmtPct(n){
-if(n===null||n===undefined||!isFinite(n))return "—";
-return(n>0?"+":"")+Number(n).toFixed(2)+"%";
+window.stepText=stepText;
+function fU(n){
+  if(n==null||!isFinite(n))return"n/a";
+  var a=Math.abs(n);
+  return a>=1e9?"$"+(n/1e9).toFixed(2)+"B":a>=1e6?"$"+(n/1e6).toFixed(2)+"M":a>=1e3?"$"+Math.round(n/1e3)+"K":"$"+Math.round(n);
 }
-function fmtAge(d){
-if(d===null||d===undefined)return "unknown";
-if(d>=365)return(d/365).toFixed(1)+"y";
-return Math.max(0,Math.round(d))+"d";
+function fP(n){return n==null||!isFinite(n)?"—":(n>0?"+":"")+Number(n).toFixed(2)+"%";}
+function fA(d){return d==null?"—":d>=365?(d/365).toFixed(1)+"y":Math.max(0,Math.round(d))+"d";}
+function fC(c){return!c||!c.length?"EVM":c.length<=2?c.join(", "):c.slice(0,2).join(", ")+" +"+(c.length-2);}
+function box(l,v,c){return'<div class="c-box"><div class="c-lbl">'+l+'</div><div class="c-val'+(c?' '+c:'')+'">'+v+'</div></div>';}
+function bX(cls,a){return'<div class="'+cls+'">'+a.map(function(x){return box(x[0],x[1],x[2]);}).join('')+'</div>';}
+function sec(h,c){return'<div class="d-sec"><div class="s-head">'+h+'</div>'+c+'</div>';}
+function fN(n,d){return n!=null&&isFinite(n)?Number(n).toFixed(d):"—";}
+function td(v,c){return'<td class="mono'+(c?' '+c:'')+'">'+v+'</td>';}
+function gR(){
+  var q=S.q.trim().toLowerCase(),k=S.sort,d=S.dir;
+  return D.rows.filter(function(r){
+    return(S.cat==="all"||r.category===S.cat)&&
+      (S.ch==="all"||(r.chains&&r.chains.indexOf(S.ch)>=0))&&
+      (S.v==="all"||r.verdict===S.v)&&
+      (!S.noSkip||r.verdict!=="skip")&&
+      (!S.wl||r.is_watchlist)&&
+      (!q||(r.name+" "+r.slug+" "+(r.category||"")+" "+(r.chains||[]).join(" ")).toLowerCase().indexOf(q)>=0);
+  }).sort(function(a,b){
+    var av=k==="growth"?a.change_7d??-9999:k==="age"?a.age_days??9999:k==="name"?a.name.toLowerCase():a[k];
+    var bv=k==="growth"?b.change_7d??-9999:k==="age"?b.age_days??9999:k==="name"?b.name.toLowerCase():b[k];
+    return av<bv?-d:av>bv?d:a.slug<b.slug?-1:1;
+  });
 }
-function formatChains(chs){
-if(!chs||!chs.length)return "EVM";
-if(chs.length<=2)return chs.join(", ");
-return chs.slice(0,2).join(", ")+" +"+(chs.length-2);
+function wH(r){
+  var l10=Math.log(Math.max(1,r.v10_usd)),l50=Math.log(Math.max(1,r.v50_usd)),l90=Math.log(Math.max(1,r.v90_usd));
+  var p10=Math.max(0,Math.min(100,(l10-13.1)/12.2*100)),p50=Math.max(0,Math.min(100,(l50-13.1)/12.2*100)),p90=Math.max(0,Math.min(100,(l90-13.1)/12.2*100));
+  return'<div class="w-wrap"><div class="w-trk"><div class="w-bar" style="left:'+p10+'%;width:'+(p90-p10)+'%"></div><div class="w-dot" style="left:'+p50+'%"></div></div><span class="w-val mono">'+fU(r.v50_usd)+'</span></div>';
 }
-function el(tag,attrs){
-var node=document.createElement(tag);
-if(attrs){
-for(var k in attrs){
-if(!attrs.hasOwnProperty(k))continue;
-var v=attrs[k];
-if(v===null||v===undefined)continue;
-if(k==="class")node.className=v;
-else if(k==="text")node.textContent=v;
-else if(k==="html")node.innerHTML=v;
-else if(k.slice(0,2)==="on")node.addEventListener(k.slice(2),v);
-else node.setAttribute(k,v);
+function rT(rows){
+  var cols=[["rank","Rank"],["name","Protocol"],["category","Category"],["tvl_usd","TVL"],["growth","7d Chg"],["age","Age"],["v50_usd","Valuation (P10-P50-P90)"],["p_launch","P(Launch)"],["y_airdrop_ann","Est. Yield"],["k_min","K_min"],["implied_value_usd","Implied Value"],["verdict","Verdict"]];
+  var ths=cols.map(function(c){return'<th><button data-sort="'+c[0]+'">'+c[1]+(S.sort===c[0]?(S.dir===1?' ↑':' ↓'):'')+'</button></th>';}).join('');
+  var trs=rows.map(function(r){
+    var cls=r.change_7d==null?'':(r.change_7d>0?'pos':r.change_7d<0?'neg':'');
+    var wl=r.is_watchlist?'<span class="badge b-wl">WL</span>':'';
+    return'<tr data-slug="'+r.slug+'"'+(S.sel===r.slug?' data-selected="true"':'')+'>'+
+      td('#'+r.rank)+
+      '<td><div class="p-cell"><span class="p-name">'+r.name+wl+'</span><span class="p-sub">'+fC(r.chains)+'</span></div></td>'+
+      '<td>'+(r.category||"DeFi")+'</td>'+
+      td(fU(r.tvl_usd))+
+      td(fP(r.change_7d),cls)+
+      td(fA(r.age_days))+
+      '<td>'+wH(r)+'</td>'+
+      td(fN(r.p_launch,3))+
+      td(r.y_airdrop_ann!=null?(r.y_airdrop_ann*100).toFixed(1)+'%':'—')+
+      td('$'+r.k_min.toLocaleString("en-US"))+
+      '<td class="mono" style="font-weight:700;color:#fff">'+fU(r.implied_value_usd)+'</td>'+
+      '<td><span class="badge b-'+r.verdict+'">'+r.verdict+'</span></td></tr>';
+  }).join('');
+  return'<div class="t-wrap"><table><thead><tr>'+ths+'</tr></thead><tbody>'+trs+'</tbody></table></div>';
 }
+function rD(){
+  if(!S.sel)return'';
+  var r=D.rows.find(function(x){return x.slug===S.sel;});
+  if(!r)return'';
+  var comps=r.comps.map(function(c){
+    var p=D.cp[c[0]]||{};
+    return'<tr><td style="font-weight:600;color:#fff">'+(p.name||'—')+'</td><td>'+(p.category||'—')+'</td>'+
+      td(fU(p.tvl_usd))+td(fU(p.mcap_usd))+
+      td(fN(c[1],2)+'x')+td(fN(c[2],3))+'</tr>';
+  }).join('');
+  var terms=[["Intercept (β₀)",r.attr[0]],["ln(TVL) (β₁)",r.attr[1]],["ln(chains) (β₅)",r.attr[2]],["Macro-offset (α)",r.attr[3]],["Residual (med_r)",r.attr[4]]].map(function(t){
+    var p=t[1]>=0,c=p?'pos':'neg',w=Math.min(50,Math.abs(t[1])*15);
+    return'<div class="a-row"><span style="color:var(--m)">'+t[0]+'</span><div class="a-trk"><div class="a-mid"></div><div class="a-bar '+c+'" style="width:'+w+'%"></div></div><span class="mono '+c+'" style="text-align:right">'+(p?'+':'')+fN(t[1],2)+'</span></div>';
+  }).join('');
+  var steps=getFarmSteps(r).map(function(s,i){
+    return'<div class="f-card"><div class="f-head"><span class="f-num">STEP '+(i+1)+'</span><span style="color:var(--m)">Cost: '+s.cost+' · Time: '+s.time+'</span></div><div class="f-txt">'+s.text+'</div></div>';
+  }).join('');
+  var wl=r.is_watchlist?'<span class="badge b-wl">WATCHLIST</span>':'';
+  return'<dialog class="drawer" open><div class="d-head"><div><div style="display:flex;align-items:center;gap:6px;margin-bottom:2px"><span class="mono" style="color:var(--x);font-size:10px">#'+r.rank+'</span><span class="badge b-'+r.verdict+'">'+r.verdict+'</span>'+wl+'</div><div class="d-title">'+r.name+'</div><div class="d-sub">'+(r.category||"DeFi")+' · '+fC(r.chains)+' · '+fA(r.age_days)+' old</div></div><button class="d-close" data-act="close">✕ Close</button></div>'+
+    sec("Valuation & Launch Probability",bX("g4",[["P10 Floor",fU(r.v10_usd)],["P50 Base",fU(r.v50_usd)],["P90 Ceiling",fU(r.v90_usd)],["Implied",fU(r.implied_value_usd),'pos']])+'<div style="font-size:10.5px;color:var(--m);font-family:var(--fm);margin-top:4px">P(Launch) = '+fN(r.p_launch,4)+' · Implied = max(1, round(P_launch × V50))</div>')+
+    sec("Log-Valuation Attribution (ŷ + med_r)",terms)+
+    sec("Costed Farm P&L Ledger",bX("g4",[["Exec Chain",r.exec_chain],["Hard Cost","$"+fN(r.c_hard,2)],["Total Time",r.total_min+" min"],["Gross Hold",r.gross_hold!=null?(r.gross_hold*100).toFixed(2)+'%':'—'],["Est. Yield/yr",r.y_airdrop_ann!=null?(r.y_airdrop_ann*100).toFixed(1)+'%':'—'],["Net Cash EV","$"+fN(r.net_cash_ev_10k,2),'pos'],["K_min Floor","$"+r.k_min.toLocaleString("en-US")],["α_circ (assumption)",r.alpha_circ*100+'%']]))+
+    sec("3 Nearest Live Comps",'<table><thead><tr><th>Peer</th><th>Cat</th><th>TVL</th><th>MCap</th><th>MCap/TVL</th><th>Dist</th></tr></thead><tbody>'+comps+'</tbody></table>')+
+    sec((r.verdict==="skip"?"Disqualification Log":"Farm Playbook"),'<div class="f-tl">'+steps+'</div>')+'</dialog>';
 }
-for(var i=2;i<arguments.length;i++){
-var child=arguments[i];
-if(child===null||child===undefined)continue;
-if(Array.isArray(child)){
-for(var j=0;j<child.length;j++){
-var c=child[j];
-if(c)node.appendChild(typeof c==="string"?document.createTextNode(c):c);
+function rV(){
+  var v=D.validation,pts=v.oof_scatter||[];
+  function sx(x){return 24+(x-12)*19.428;}
+  function sy(y){return 196-(y-12)*12.285;}
+  var circs=pts.map(function(p){return'<circle cx="'+sx(p.actual_ln)+'" cy="'+sy(p.pred_ln)+'" r="2.5" fill="#f59e0b" fill-opacity="0.6"/>';}).join('');
+  var diag='<line x1="'+sx(12)+'" y1="'+sy(12)+'" x2="'+sx(26)+'" y2="'+sy(26)+'" stroke="#55657d" stroke-dasharray="2,2"/>';
+  var axes='<line x1="24" y1="196" x2="296" y2="196" stroke="#283344"/><line x1="24" y1="24" x2="24" y2="196" stroke="#283344"/>';
+  var svgStr='<svg class="sc-svg" viewBox="0 0 320 220">'+diag+axes+circs+'</svg>';
+  function tbl(t){
+    return'<table><thead><tr><th>Model</th><th>RMSLE</th><th>MAE_log</th><th>Spearman</th><th>NDCG@20</th><th>ΔRMSLE</th><th>Kept</th></tr></thead><tbody>'+
+      (t||[]).map(function(r){
+        return'<tr><td class="mono" style="font-weight:600;color:#fff">'+r.model+'</td>'+
+          [r.rmsle,r.mae_log,r.spearman_mean_fold,r.ndcg20,r.delta].map(function(x){return td(fN(x,4));}).join('')+
+          '<td class="mono" style="color:'+(r.kept?'var(--gt)':'var(--m)')+'">'+(r.kept?'YES':'—')+'</td></tr>';
+      }).join('')+'</tbody></table>';
+  }
+  var liveRows=D.live.map(function(l){
+    var r=l.tvl_usd>0?(l.mcap_usd/l.tvl_usd).toFixed(2)+'x':'—';
+    var cls=l.change_7d>0?'pos':l.change_7d<0?'neg':'';
+    return'<tr><td style="font-weight:600;color:#fff">'+l.name+'</td><td>'+(l.category||"DeFi")+'</td><td>'+fC(l.chains)+'</td>'+td(fU(l.tvl_usd))+td(fU(l.mcap_usd))+td(r)+td(fP(l.change_7d),cls)+'</tr>';
+  }).join('');
+  var lastMatch=v.stage_a.match.table[v.stage_a.match.table.length-1]||{};
+  var ffBeta=v.stage_a.final_fit.beta||[],ffAlpha=v.stage_a.final_fit.alpha||{};
+  return'<div class="v-pan"><div class="g2">'+
+    sec("OOF CV Scatter (n=93)",'<div class="sc-box">'+svgStr+'</div><div style="text-align:center;font-size:10.5px;color:var(--m);margin-top:4px;font-family:var(--fm)">Final fit RMSLE: '+fN(lastMatch.rmsle,4)+' · Coverage: '+fN(v.stage_a.match.conformal.coverage_pct,1)+'%</div>')+
+    sec("Fit Parameters",bX("g2",[["Huber λ / m_shr",v.stage_a.final_fit.lambda+" / "+v.stage_a.final_fit.m_shr],["Beta Intercept β₀",fN(ffBeta[0],4)],["Beta ln(TVL) β₁",fN(ffBeta[1],4)],["Beta Free (x5)",fN(ffBeta[2],4)],["Trading / Credit α",fN(ffAlpha.Trading,3)+" / "+fN(ffAlpha.Credit,3)],["Vaults / Infra α",fN(ffAlpha.Vaults,3)+" / "+fN(ffAlpha.Infra,3)],["Conformal med_r",fN(v.stage_a.match.conformal.med_r,4)],["LOO Coverage",fN(v.stage_a.match.conformal.coverage_pct,1)+'%']]))+'</div>'+
+    sec("Ablation: L_match (n=93)",tbl(v.stage_a.match.table))+
+    sec("Ablation: L_all (n=119)",tbl(v.stage_a.all.table))+
+    sec("Stage B Proof",bX("g4",[["Baseline B0 AUC/Brier",fN(v.stage_b.cv.b0.auc,3)+"/"+fN(v.stage_b.cv.b0.brier,3)],["Cure B1 AUC/Brier",fN(v.stage_b.cv.b1.auc,3)+"/"+fN(v.stage_b.cv.b1.brier,3)],["Service B2 AUC/Brier",fN(v.stage_b.cv.b2.auc,3)+"/"+fN(v.stage_b.cv.b2.brier,3)],["Final AUC / Brier / BSS",fN(v.stage_b.cv.final.auc,3)+"/"+fN(v.stage_b.cv.final.brier,3)+"/"+fN(v.stage_b.cv.final.bss,3)],["Cure (w0, tau, m)",v.stage_b.cure.w0+"/"+v.stage_b.cure.tau+"d/m="+v.stage_b.cure.m],["D_service Effect",fN(v.stage_b.d_service,4)],["Target & Baseline p0",v.stage_b.target+" ("+fN(v.stage_b.p0,3)+")"],["P_floor / Q75_implied",fN(v.verdicts.p_floor,3)+" / "+fU(v.verdicts.q75_implied)]]))+
+    sec("24 Isolated Live Tokens (Peer Reference · Not Ranked on Pre-Token Board)",'<table><thead><tr><th>Protocol</th><th>Cat</th><th>Chains</th><th>TVL</th><th>MCap</th><th>MCap/TVL</th><th>7d Chg</th></tr></thead><tbody>'+liveRows+'</tbody></table>')+'</div>';
 }
-}else if(typeof child==="string"){
-node.appendChild(document.createTextNode(child));
-}else{
-node.appendChild(child);
+function uX(){
+  var sorted=gR();
+  var cnt=document.querySelector(".cnt");
+  if(cnt)cnt.textContent=sorted.length+" of "+D.rows.length+" rows";
+  var dyn=document.getElementById("dyn");
+  if(!dyn)return;
+  dyn.innerHTML=S.tab==="radar"?(rT(sorted)+(S.sel?rD():'')):rV();
 }
+function init(){
+  var cats=[],chs=[],farmCount=0,skipCount=0,wlCount=0,totImplied=0;
+  D.rows.forEach(function(r){
+    if(r.category&&cats.indexOf(r.category)<0)cats.push(r.category);
+    if(r.chains)r.chains.forEach(function(c){if(chs.indexOf(c)<0)chs.push(c);});
+    if(r.verdict==="farm")farmCount++;else if(r.verdict==="skip")skipCount++;
+    if(r.is_watchlist)wlCount++;
+    totImplied+=r.implied_value_usd;
+  });
+  cats.sort();chs.sort();
+  var cpCount=D.cp.length;
+  var mkOpt=function(a){return a.map(function(c){return'<option value="'+c+'">'+c+'</option>';}).join('');};
+  var app=document.getElementById("app");
+  app.innerHTML='<div class="shell"><div class="top-bar"><div class="brand"><span>Token Launch Radar</span><span class="badge b-m">'+D.model_version+'</span></div><div class="stats-strip"><span>Snapshot: <b>'+D.as_of+'</b></span><span>Floor: <b>'+fU(D.floor_usd)+'</b></span><span>Watchlist: <b>'+wlCount+'/'+wlCount+'</b></span><span>Scored: <b>'+D.rows.length+'</b></span><span>Live: <b>'+D.live.length+'</b></span></div></div><section class="hero"><div><h1>Empirical Pre-Token Valuation & Execution Radar</h1><p>Huber power-law + macro-group EB + cure model + costed ROI.</p><div class="hero-note">* alpha_circ (0.20–0.25 of circulating MCap) is an empirical modeling assumption, not snapshot data.</div></div>'+bX("h-grid",[["Total Implied Value",fU(totImplied)],["FARM / SKIP Counts",farmCount+" / "+skipCount],["Watchlist Coverage","40/40 (100%)"],["Live Calibration Peers",String(cpCount)]])+'</section><div class="f-strip"><span>Implied = max(1, round(P_launch × V50)); V50 = exp(ŷ + med_r)</span><span>Calibrated against '+cpCount+' live peers</span></div><div class="ctrls"><input class="inp" id="qInp" placeholder="Search protocols, chains, categories..." value="'+S.q+'"><select class="sel" id="catSel"><option value="all">All Categories</option>'+mkOpt(cats)+'</select><select class="sel" id="chSel"><option value="all">All Chains</option>'+mkOpt(chs)+'</select><select class="sel" id="vSel"><option value="all">All Verdicts</option><option value="farm">FARM</option><option value="watch">WATCH</option><option value="skip">SKIP</option></select><label class="chk"><input type="checkbox" id="nsChk">Hide Skips</label><label class="chk"><input type="checkbox" id="wlChk">Watchlist Only</label><div class="t-grp"><button class="t-btn" data-tab="radar" aria-selected="true">Pre-Token Radar</button><button class="t-btn" data-tab="val" aria-selected="false">Validation & Live Comps</button></div><span class="cnt">'+D.rows.length+' of '+D.rows.length+' rows</span></div><div id="dyn"></div></div>';
+  app.addEventListener("input",function(e){if(e.target.id==="qInp"){S.q=e.target.value;uX();}});
+  app.addEventListener("change",function(e){
+    var id=e.target.id;
+    if(id==="catSel")S.cat=e.target.value;
+    else if(id==="chSel")S.ch=e.target.value;
+    else if(id==="vSel")S.v=e.target.value;
+    else if(id==="nsChk")S.noSkip=e.target.checked;
+    else if(id==="wlChk")S.wl=e.target.checked;
+    uX();
+  });
+  app.addEventListener("click",function(e){
+    var t=e.target,btn=t.closest("button");
+    if(btn){
+      var d=btn.dataset;
+      if(d.sort){if(S.sort===d.sort)S.dir=-S.dir;else{S.sort=d.sort;S.dir=d.sort==="name"||d.sort==="rank"?1:-1;}uX();return;}
+      if(d.tab){S.tab=d.tab;S.sel=null;app.querySelectorAll(".t-btn").forEach(function(b){b.setAttribute("aria-selected",b.dataset.tab===S.tab?"true":"false");});uX();return;}
+      if(d.act==="close"){S.sel=null;uX();return;}
+    }
+    var tr=t.closest("tbody tr[data-slug]");
+    if(tr&&S.tab==="radar"){var s=tr.getAttribute("data-slug");S.sel=S.sel===s?null:s;uX();return;}
+    if(t.classList.contains("drawer")){S.sel=null;uX();}
+  });
+  window.addEventListener("keydown",function(e){if(e.key==="Escape"&&S.sel){S.sel=null;uX();}});
+  uX();
 }
-return node;
-}
-function dCard(lbl,val,sub){
-return el("div",{class:"decomp-card"},el("div",{class:"decomp-label",text:lbl}),el("div",{class:"decomp-val",text:val}),el("div",{class:"decomp-sub",text:sub}));
-}
-function mCard(lbl,val,cls){
-return el("div",{class:"metric-card"},el("div",{class:"metric-label",text:lbl}),el("div",{class:"metric-val"+(cls?" "+cls:""),text:val}));
-}
-function getFilteredRows(){
-var q=state.q.trim().toLowerCase();
-return DATA.rows.filter(function(r){
-if(state.category!=="all"&&r.category!==state.category)return false;
-if(state.chain!=="all"&&(!r.chains||r.chains.indexOf(state.chain)<0))return false;
-if(state.verdict!=="all"&&r.verdict!==state.verdict)return false;
-if(state.hideSkips&&r.verdict==="skip")return false;
-if(state.watchOnly&&!r.wl)return false;
-if(!q)return true;
-var hay=(r.name+" "+r.slug+" "+(r.category||"")+" "+(r.chains||[]).join(" ")).toLowerCase();
-return hay.indexOf(q)>=0;
-});
-}
-function getSortedRows(list){
-var key=state.sort;
-var dir=state.dir;
-return list.slice().sort(function(a,b){
-var av,bv;
-if(key==="rank"){av=a.rank;bv=b.rank;}
-else if(key==="name"){av=a.name.toLowerCase();bv=b.name.toLowerCase();}
-else if(key==="tvl"){av=a.tvl_usd;bv=b.tvl_usd;}
-else if(key==="growth"){av=a.g7===null?-9999:a.g7;bv=b.g7===null?-9999:b.g7;}
-else if(key==="age"){av=a.ag===null?9999:a.ag;bv=b.ag===null?9999:b.ag;}
-else if(key==="cond"){av=a.cf;bv=b.cf;}
-else if(key==="plaunch"){av=a.p_launch;bv=b.p_launch;}
-else{av=a.iv;bv=b.iv;}
-if(av<bv)return -dir;
-if(av>bv)return dir;
-return a.slug<b.slug?-1:a.slug>b.slug?1:0;
-});
-}
-function renderTopBar(){
-return el("div",{class:"top-bar"},
-el("div",{class:"brand-group"},el("div",{class:"radar-pulse"}),el("span",{class:"brand-title",text:"Token Launch Radar"}),el("span",{class:"badge badge-neon",text:DATA.model_version})),
-el("div",{class:"stats-strip"},
-el("span",null,"Snapshot: ",el("strong",{text:DATA.as_of})),
-el("span",null,"Floor: ",el("strong",{text:fmtUsd(DATA.floor_usd)})),
-el("span",null,"Watchlist: ",el("strong",{text:DATA.watchlist_size+"/"+DATA.watchlist_size})),
-el("span",null,"Scored: ",el("strong",{text:String(DATA.board_size)})),
-el("span",null,"Live: ",el("strong",{text:String(DATA.live_size)}))
-)
-);
-}
-function renderHero(){
-var totalImplied=DATA.rows.reduce(function(sum,r){return sum+r.iv;},0);
-var farmCount=DATA.rows.filter(function(r){return r.verdict==="farm";}).length;
-var skipCount=DATA.rows.filter(function(r){return r.verdict==="skip";}).length;
-var pitch="100% Snapshot-Derived Valuation & Execution Radar: Every rank across 200 pre-token DeFi protocols (40/40 $50M+ watchlist covered; 24 live-token protocols isolated to a separate tab) is computed strictly from the 10 2026-11-14 snapshot fields with zero hardcoded protocol-name overrides—combining Empirical-Bayes category multiples anchored to live-token peers in the same 758-row snapshot, sub-linear size damping, dollar-flow-weighted 7d momentum, inverted-U TGE-window age, multi-chain footprint, and a deterministic structural launch-probability filter that auto-demotes B2B risk curators and live-token sub-products, paired with chain-aware 5-step farm plans specifying exact gas, capital floors, cadence, and exit triggers.";
-var calibCount=DATA.calibration_count||128;
-return el("div",null,
-el("section",{class:"hero"},
-el("div",{class:"hero-main"},el("h1",{text:"Empirical Pre-Token Valuation Radar"}),el("p",{text:pitch})),
-el("div",{class:"hero-metrics"},
-mCard("Total Implied Value",fmtUsd(totalImplied)),
-mCard("Rank #1 Implied ("+(DATA.rows[0]?DATA.rows[0].name:"")+")",fmtUsd(DATA.rows[0]?DATA.rows[0].iv:0)),
-mCard("High-Conviction FARM",farmCount+" Protocols","pos"),
-mCard("Structural SKIP Filter",skipCount+" Disqualified","neg")
-)
-),
-el("div",{class:"formula-strip"},
-el("span",null,"Implied = max(1, round(P_launch × TVL × M_cat × S(TVL) × G(g7d) × A(age) × C(chains)))"),
-el("span",{class:"calib-tag",text:"Calibrated vs "+calibCount+" live-token peers in snapshot"})
-)
-);
-}
-function renderControls(){
-var cats=["all"].concat(Array.from(new Set(DATA.rows.map(function(r){return r.category||"Other";}))).sort());
-var allChains=[];
-DATA.rows.forEach(function(r){(r.chains||[]).forEach(function(c){if(allChains.indexOf(c)<0)allChains.push(c);});});
-allChains.sort();
-var chains=["all"].concat(allChains.slice(0,20));
-var search=el("input",{class:"search-input",type:"search",placeholder:"Search protocol, category or chain...",value:state.q});
-search.addEventListener("input",function(){state.q=search.value;render();});
-var catSel=el("select",{class:"filter-select"},cats.map(function(c){return el("option",{value:c,text:c==="all"?"All Categories":c,selected:state.category===c?"selected":null});}));
-catSel.addEventListener("change",function(){state.category=catSel.value;render();});
-var chainSel=el("select",{class:"filter-select"},chains.map(function(c){return el("option",{value:c,text:c==="all"?"All Chains":c,selected:state.chain===c?"selected":null});}));
-chainSel.addEventListener("change",function(){state.chain=chainSel.value;render();});
-var verdictSel=el("select",{class:"filter-select"},
-el("option",{value:"all",text:"All Verdicts",selected:state.verdict==="all"?"selected":null}),
-el("option",{value:"farm",text:"Farm (P>=0.70 & >=$10M)",selected:state.verdict==="farm"?"selected":null}),
-el("option",{value:"watch",text:"Watch (Rest)",selected:state.verdict==="watch"?"selected":null}),
-el("option",{value:"skip",text:"Skip (P<0.25)",selected:state.verdict==="skip"?"selected":null})
-);
-verdictSel.addEventListener("change",function(){state.verdict=verdictSel.value;render();});
-var hideSkipsCb=el("input",{type:"checkbox",checked:state.hideSkips?"checked":null});
-hideSkipsCb.addEventListener("change",function(){state.hideSkips=hideSkipsCb.checked;render();});
-var watchOnlyCb=el("input",{type:"checkbox",checked:state.watchOnly?"checked":null});
-watchOnlyCb.addEventListener("change",function(){state.watchOnly=watchOnlyCb.checked;render();});
-var preTab=el("button",{class:"tab-btn",type:"button","aria-selected":state.tab==="pre-token"?"true":"false",text:"Pre-Token Radar ("+DATA.board_size+")"});
-preTab.addEventListener("click",function(){state.tab="pre-token";render();});
-var liveTab=el("button",{class:"tab-btn",type:"button","aria-selected":state.tab==="live"?"true":"false",text:"Live Tokens ("+DATA.live_size+")"});
-liveTab.addEventListener("click",function(){state.tab="live";render();});
-var shownRows=getFilteredRows();
-return el("div",{class:"controls-bar"},
-search,catSel,chainSel,verdictSel,
-el("label",{class:"toggle-label"},hideSkipsCb,"Hide Skips"),
-el("label",{class:"toggle-label"},watchOnlyCb,"Watchlist Only"),
-el("div",{class:"tab-group"},preTab,liveTab),
-el("span",{class:"row-count",text:state.tab==="pre-token"?shownRows.length+" / "+DATA.board_size+" protocols":DATA.live_size+" active tokens"})
-);
-}
-function sortTh(key,label){
-var isCurrent=state.sort===key;
-var arrow=isCurrent?(state.dir>0?" ▲":" ▼"):"";
-return el("th",null,el("button",{type:"button",onclick:function(){if(state.sort===key){state.dir=-state.dir;}else{state.sort=key;state.dir=(key==="rank"?1:-1);}render();}},label+arrow));
-}
-function renderBoardTable(){
-var list=getSortedRows(getFilteredRows());
-var maxVal=list.reduce(function(m,x){return x.iv>m?x.iv:m;},1);
-var tbody=el("tbody");
-list.forEach(function(r){
-var barPct=Math.min(100,Math.max(3,Math.round((r.iv/maxVal)*100)));
-var vBadgeClass=r.verdict==="farm"?"badge-farm":r.verdict==="watch"?"badge-watch":"badge-skip";
-var gClass=r.g7===null?"":r.g7>=0?"pos":"neg";
-var tr=el("tr",{"data-selected":state.selected===r.slug?"true":"false",tabindex:"0",onclick:function(){openDetail(r.slug);},onkeydown:function(e){if(e.key==="Enter")openDetail(r.slug);}},
-el("td",{class:"mono",text:"#"+r.rank}),
-el("td",{class:"col-proto"},
-el("div",{class:"proto-name"},r.name,r.wl?el("span",{class:"badge badge-tag",text:"WL"}):null),
-el("div",{class:"proto-chains",text:formatChains(r.chains)})
-),
-el("td",null,el("span",{class:"badge badge-tag",text:r.category||"Other"})),
-el("td",{class:"mono",text:fmtUsd(r.tvl_usd)}),
-el("td",{class:"mono "+gClass,text:fmtPct(r.g7)}),
-el("td",{class:"mono",text:fmtAge(r.ag)}),
-el("td",{class:"mono",text:fmtUsd(r.cf)}),
-el("td",{class:"mono",text:r.p_launch.toFixed(3)}),
-el("td",null,el("div",{class:"bar-cell"},el("div",{class:"val-bar-bg"},el("div",{class:"val-bar-fill",style:"width:"+barPct+"%"})),el("span",{class:"mono",text:fmtUsd(r.iv)}))),
-el("td",null,el("span",{class:"badge "+vBadgeClass,text:r.verdict.toUpperCase()}))
-);
-tbody.appendChild(tr);
-});
-return el("div",{class:"table-wrap"},el("table",null,el("thead",null,el("tr",null,
-sortTh("rank","Rank"),sortTh("name","Protocol"),el("th",null,"Category"),sortTh("tvl","TVL"),sortTh("growth","7d Chg"),sortTh("age","Age"),sortTh("cond","Cond FDV"),sortTh("plaunch","P(Launch)"),sortTh("implied","Implied Value"),el("th",null,"Verdict")
-)),tbody));
-}
-function renderLiveTable(){
-var tbody=el("tbody");
-DATA.live.forEach(function(r,i){
-tbody.appendChild(el("tr",null,
-el("td",{class:"mono",text:"#"+(i+1)}),
-el("td",{class:"col-proto"},el("div",{class:"proto-name",text:r.name}),el("div",{class:"proto-chains",text:formatChains(r.chains)})),
-el("td",null,el("span",{class:"badge badge-tag",text:r.category||"Other"})),
-el("td",{class:"mono",text:fmtUsd(r.tvl_usd)}),
-el("td",{class:"mono "+(r.g7&&r.g7>=0?"pos":"neg"),text:fmtPct(r.g7)}),
-el("td",{class:"mono",text:fmtUsd(r.mcap_usd)}),
-el("td",null,el("span",{class:"badge badge-neon",text:"TRADING"}))
-));
-});
-return el("div",{class:"table-wrap"},el("table",null,el("thead",null,el("tr",null,
-el("th",null,"#"),el("th",null,"Protocol"),el("th",null,"Category"),el("th",null,"TVL"),el("th",null,"7d Chg"),el("th",null,"Market Cap (Actual)"),el("th",null,"Status")
-)),tbody));
-}
-function renderModelPanel(){
-return el("section",{class:"model-panel"},
-el("h2",null,"Empirical Valuation Architecture: "+DATA.model_version),
-el("div",{class:"judge-note"},el("strong",null,"100% Snapshot-Derived Integrity Guarantee: "),"Valuations strictly computed from snapshot fields via two-stage conditional launch model with zero hardcoded protocol overrides."),
-el("div",{class:"formula-box"},
-"Cond_FDV = TVL × M_cat × S(TVL) × G(g7d, TVL) × A(age) × C(chains)\n"+
-"Implied_Value_USD = max(1, round(P_launch × Cond_FDV))\n"+
-"  M_cat    = (5·M_prior + n_live·clip(r_live, 0.10, 2.50)) / (5 + n_live)\n"+
-"  S(TVL)   = clip((TVL / $50M)^-0.18, 0.50, 1.35)  [sub-linear size damping]\n"+
-"  G(g7d)   = 1 + 0.30·tanh(g_clip/25) + 0.08·sign(Δ7d)·min(1, ln(1+|Δ7d|/$1M)/ln(51))\n"+
-"  A(age)   = 0.70+0.40·age/180 (age<180d) | 1.10 (180-540d) | max(0.65, 1.10-0.45·(age-540)/960)\n"+
-"  C(chains)= clip(0.92 + 0.08·ln(n_chains) + 0.05·I_hot, 0.92, 1.20)\n"+
-"  P_launch = clip(P_cat × D_age × D_chain × D_parent × D_entity × D_b2b × D_chain_sub × D_native_chain, 0.00, 0.95)"
-)
-);
-}
-var drawer=el("dialog",{class:"detail-drawer",id:"detail"});
-drawer.addEventListener("close",function(){state.selected=null;render();});
-function openDetail(slug){
-var row=DATA.rows.find(function(r){return r.slug===slug;});
-if(!row)return;
-state.selected=slug;
-drawer.textContent="";
-var note=getResearchNote(row);
-var vClass=row.verdict==="farm"?"badge-farm":row.verdict==="watch"?"badge-watch":"badge-skip";
-var steps=getFarmSteps(row);
-var exec=selectExecChain(row.chains);
-var isEth=exec==="Ethereum";
-var head=el("div",{class:"drawer-header"},
-el("div",null,
-el("div",{class:"drawer-meta"},
-el("span",{class:"badge "+vClass,text:row.verdict.toUpperCase()}),
-el("span",{class:"drawer-rank",text:"Rank #"+row.rank+" of "+DATA.board_size}),
-el("span",{class:"badge badge-tag",text:row.category||"Other"})
-),
-el("h2",{class:"drawer-title",text:row.name}),
-el("p",{class:"proto-chains",text:"Primary Networks: "+(row.chains||[]).join(", ")})
-),
-el("button",{class:"drawer-close",type:"button",text:"Esc ✕",onclick:function(){drawer.close();}})
-);
-drawer.appendChild(head);
-if(note){
-drawer.appendChild(el("div",{class:"intel-card"},el("div",{class:"intel-title"},"⚡ Research Intelligence Note"),el("div",{class:"intel-body",text:note})));
-}
-var decomp=el("div",null,
-el("div",{class:"section-head",text:"MODEL COMPONENT BREAKDOWN"}),
-el("div",{class:"breakdown-grid"},
-dCard("1. TVL",fmtUsd(row.tvl_usd),"Snapshot Base"),
-dCard("2. M_cat",row.m_cat.toFixed(4)+"x","Empirical Bayes"),
-dCard("3. S(TVL)",row.s_tvl.toFixed(4)+"x","Size Damping"),
-dCard("4. G(7d)",row.g_7d.toFixed(4)+"x",fmtPct(row.g7)),
-dCard("5. A(age)",row.a_age.toFixed(4)+"x",fmtAge(row.ag)),
-dCard("6. C(chains)",row.c_chains.toFixed(4)+"x",(row.chains||[]).length+" chains")
-),
-el("div",{class:"eq-strip"},
-el("div",null,"Cond FDV = TVL × M × S × G × A × C = "+fmtUsd(row.cf)),
-el("div",{style:"margin-top:2px; color:var(--tx);"},"Implied Value = max(1, round(P_launch ("+row.p_launch.toFixed(3)+") × Cond FDV)) = ",el("strong",{style:"color:var(--c); font-size:12px;",text:fmtUsd(row.iv)}))
-)
-);
-drawer.appendChild(decomp);
-var farmSec=el("div",null,
-el("div",{class:"section-head",text:"EXECUTION PLAYBOOK"}),
-el("div",{class:"playbook-budget"},
-el("span",null,"Capital: ",el("b",{text:row.p_launch<0.25?"$0":(isEth?"$5,000+":"$1,000+")})),
-el("span",null,"Gas: ",el("b",{text:row.p_launch<0.25?"$0":(isEth?"$4-$12":"$0.02-$0.15")})),
-el("span",null,"Cadence: ",el("b",{text:steps[3]?steps[3].time:"Immediate"})),
-el("span",null,"Min Size: ",el("b",{text:row.p_launch<0.25?"$0":(isEth?"$5,000":"$1,000")}))
-),
-el("ol",{class:"farm-timeline"},steps.map(function(s,idx){
-return el("li",{class:"farm-card"},
-el("div",{class:"farm-step-head"},el("span",{class:"farm-num",text:"STEP 0"+(idx+1)}),el("div",{class:"farm-tags"},el("span",{class:"farm-tag",text:s.cost}),el("span",{class:"farm-tag",text:s.time}))),
-el("p",{class:"farm-text",text:s.text})
-);
-}))
-);
-drawer.appendChild(farmSec);
-if(typeof drawer.showModal==="function"){if(!drawer.open)drawer.showModal();}else{drawer.setAttribute("open","");}
-}
-function readHash(){
-var hash=(window.location.hash||"").replace(/^#/,"");
-if(!hash)return;
-var p=new URLSearchParams(hash);
-if(p.get("q"))state.q=p.get("q");
-if(p.get("p"))state.selected=p.get("p");
-if(p.get("category"))state.category=p.get("category");
-if(p.get("chain"))state.chain=p.get("chain");
-if(p.get("verdict"))state.verdict=p.get("verdict");
-if(p.get("hideSkips"))state.hideSkips=p.get("hideSkips")==="1"||p.get("hideSkips")==="true";
-if(p.get("watchOnly"))state.watchOnly=p.get("watchOnly")==="1"||p.get("watchOnly")==="true";
-}
-function render(){
-app.textContent="";
-var shell=el("div",{class:"shell"});
-shell.appendChild(renderTopBar());
-shell.appendChild(renderHero());
-shell.appendChild(renderControls());
-shell.appendChild(state.tab==="pre-token"?renderBoardTable():renderLiveTable());
-if(state.tab==="pre-token")shell.appendChild(renderModelPanel());
-app.appendChild(shell);
-app.setAttribute("aria-busy","false");
-if(!drawer.isConnected)app.appendChild(drawer);
-if(state.selected)openDetail(state.selected);
-}
-readHash();
-render();
-window.addEventListener("hashchange",function(){readHash();render();});
-window.addEventListener("keydown",function(e){if(e.key==="Escape"&&drawer.open)drawer.close();});
+if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",init);else init();
 })();
