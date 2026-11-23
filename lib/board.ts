@@ -77,6 +77,14 @@ function gateCodeToInt(gc: string): number {
   return code;
 }
 
+function packStatus(status: string): 'b' | 'k' | 'n' | 'm' {
+  if (status.startsWith('baseline')) return 'b';
+  if (status.startsWith('kept')) return 'k';
+  if (status.startsWith('tested')) return 'n';
+  if (status.startsWith('must')) return 'm';
+  throw new Error(`Unknown ablation status: ${status}`);
+}
+
 /**
  * Packs RadarData into a compact client payload (~26-30 KB) for the browser dashboard.
  */
@@ -89,18 +97,22 @@ export function dataScript(radar: RadarData): string {
     if (r.is_watchlist) watchlist_idx.push(idx);
   });
 
+  const stageA = radar.validation.stage_a;
+  const stageB = radar.validation.stage_b;
+
   // Meta block
   const meta = {
     as_of: radar.as_of,
     model_version: 'radar-5.2',
     checksum,
-    p5_7d: -16.980155,
+    p5_7d: roundJs(radar.p5_7d * 1e6) / 1e6,
     watchlist_size: radar.watchlist_size,
     watchlist_idx,
     board_size: radar.board_size,
     early_size: radar.early_size,
-    live_size: radar.live_size,
     calibration_count: radar.calibration_count,
+    ledTot: radar.validation.ledger.total,
+    b_n: stageB.n_protocols,
   };
 
   // Categories pool
@@ -139,7 +151,6 @@ export function dataScript(radar: RadarData): string {
       catMap.get(p.category ?? '') ?? -1,
       roundJs(p.tvl_usd / 10000.0),
       roundJs(p.mcap_usd / 10000.0),
-      p.g7d !== null ? roundJs(p.g7d * 100) / 100 : null,
       roundJs(p.oof_pred / 1000.0),
     ];
   });
@@ -153,7 +164,7 @@ export function dataScript(radar: RadarData): string {
     const g7d = r.change_7d !== null ? roundJs(r.change_7d * 100) / 100 : null;
     const ageDays = r.age_days ?? null;
     const v50 = roundJs(r.v50_usd);
-    const pOdds = roundJs(r.p_launch * 1e6) / 1e6;
+    const pOdds = roundJs(r.p_launch * 1e6);
     const gateCode = gateCodeToInt(r.gate_code);
     const compIdx = r.comp_idx ?? [];
 
@@ -175,8 +186,6 @@ export function dataScript(radar: RadarData): string {
   });
 
   // Fit parameters (Stage A & Stage B)
-  const stageA = radar.validation.stage_a;
-  const stageB = radar.validation.stage_b;
   const fitA = stageA.final_fit;
   const fitB = stageB.final_fit;
   const confLoo = stageA.match.conformal_loo;
@@ -197,11 +206,6 @@ export function dataScript(radar: RadarData): string {
     q25: roundJs(confLoo.q25 * 10000) / 10000,
     q75: roundJs(confLoo.q75 * 10000) / 10000,
     q90: roundJs(confLoo.q90 * 10000) / 10000,
-    q10_wf: roundJs(confWf.q10 * 10000) / 10000,
-    q25_wf: roundJs(confWf.q25 * 10000) / 10000,
-    med_r_wf: roundJs(confWf.med_r * 10000) / 10000,
-    q75_wf: roundJs(confWf.q75 * 10000) / 10000,
-    q90_wf: roundJs(confWf.q90 * 10000) / 10000,
     loo: roundJs(stageA.match.final_loo * 10000) / 10000,
     wf: roundJs(stageA.match.final_wf * 10000) / 10000,
     loo_base: roundJs(stageA.match.table[0]!.loo_typical_miss * 10000) / 10000,
@@ -218,13 +222,10 @@ export function dataScript(radar: RadarData): string {
     },
     gamma: fitB.gamma.map((x) => roundJs(x * 10000) / 10000),
     d_service: roundJs(fitB.d_service * 10000) / 10000,
-    lambda: fitB.lambda,
-    m_shr: fitB.m_shr,
     w0: fitB.w0,
     p0_asym: roundJs(fitB.p0_asym * 10000) / 10000,
-    median_age_yr: 1.807,
+    median_age_yr: roundJs(radar.median_age_yr * 1000) / 1000,
     pi_hat_c: piHatEntries,
-    brier_10fold: roundJs((([...stageB.ablation].reverse().find((r) => r.status === 'kept') ?? stageB.ablation[1]!).brier_10fold) * 10000) / 10000,
     brier_wf: roundJs(stageB.final_kept_wf_brier * 10000) / 10000,
     brier_base_wf: roundJs(stageB.baseline_wf_brier * 10000) / 10000,
     acc_wf: roundJs((([...stageB.ablation].reverse().find((r) => r.status === 'kept') ?? stageB.ablation[1]!).acc_wf) * 10000) / 10000,
@@ -240,7 +241,7 @@ export function dataScript(radar: RadarData): string {
     roundJs(r.loo_typical_miss * 10000) / 10000,
     roundJs(r.wf_typical_miss * 10000) / 10000,
     r.t_stat !== null ? roundJs(r.t_stat * 100) / 100 : null,
-    r.status,
+    packStatus(r.status),
   ]);
 
   const ablB = stageB.ablation.map((r, i) => [
@@ -249,7 +250,7 @@ export function dataScript(radar: RadarData): string {
     roundJs(r.acc_10fold * 10000) / 10000,
     roundJs(r.brier_wf * 10000) / 10000,
     roundJs(r.acc_wf * 10000) / 10000,
-    r.status,
+    packStatus(r.status),
   ]);
 
   const val = {
@@ -258,28 +259,15 @@ export function dataScript(radar: RadarData): string {
     abl_a: ablA,
     abl_b: ablB,
     se_a: [
-      roundJs((fitA.beta_se?.beta0 ?? 0.2212) * 10000) / 10000,
-      roundJs((fitA.beta_se?.beta_x_tvl ?? 0.1258) * 10000) / 10000,
+      roundJs((fitA.beta_se?.beta0 ?? 0) * 10000) / 10000,
+      roundJs((fitA.beta_se?.beta_x_tvl ?? 0) * 10000) / 10000,
     ],
     se_b: [
-      roundJs((stageB.final_fit.gamma_se?.intercept ?? 0.4618) * 10000) / 10000,
-      roundJs((stageB.final_fit.gamma_se?.beta_age_yr ?? 0.2031) * 10000) / 10000,
-      roundJs((stageB.final_fit.gamma_se?.beta_tvl_lat ?? 0.1383) * 10000) / 10000,
+      roundJs((stageB.final_fit.gamma_se?.intercept ?? 0) * 10000) / 10000,
+      roundJs((stageB.final_fit.gamma_se?.beta_age_yr ?? 0) * 10000) / 10000,
+      roundJs((stageB.final_fit.gamma_se?.beta_tvl_lat ?? 0) * 10000) / 10000,
     ],
     ledger: radar.validation.ledger.groups,
-    gates: Object.values(radar.validation.gates).map(([pass, detail]) => [
-      pass,
-      detail.length > 80 ? detail.slice(0, 77) + '...' : detail,
-    ]),
-    verdicts: {
-      counts: radar.validation.verdicts.counts,
-      farm_count_at_1_25h: radar.validation.verdicts.farm_count_at_1_25h,
-    },
-    audit: {
-      rc_skip: radar.validation.audit.rc_skip,
-      rc_in_top50: radar.validation.audit.rc_in_top50,
-      violations: radar.validation.audit.violations,
-    },
   };
 
   const packed = {

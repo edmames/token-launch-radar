@@ -1,6 +1,7 @@
 // lib/farm.ts: Costed Farm ROI engine, nearest live comps, and farm step templates
 // radar-5.2 Stage C implementation. Fully deterministic.
 
+import { macroGroup } from './model.ts';
 import { round250, roundJs } from './stats.ts';
 
 // ---------------- §1 Blueprint & Gas Engine ----------------
@@ -227,45 +228,6 @@ function round4(x: number): number {
   return roundJs(x * 1e4) / 1e4;
 }
 
-export function macroGroup(cat: string | null): string {
-  if (
-    cat === 'Dexs' ||
-    cat === 'Derivatives' ||
-    cat === 'Options' ||
-    cat === 'Prediction Market' ||
-    cat === 'Interest Rate Derivatives'
-  ) {
-    return 'Exchange';
-  }
-  if (
-    cat === 'Lending' ||
-    cat === 'CDP' ||
-    cat === 'Yield' ||
-    cat === 'Yield Aggregator' ||
-    cat === 'Farm' ||
-    cat === 'Leveraged Farming' ||
-    cat === 'Basis Trading'
-  ) {
-    return 'Credit & Yield';
-  }
-  if (
-    cat === 'Liquid Staking' ||
-    cat === 'Restaking' ||
-    cat === 'Liquid Restaking' ||
-    cat === 'Staking Pool'
-  ) {
-    return 'Staking';
-  }
-  if (
-    cat === 'Bridge' ||
-    cat === 'Cross Chain Bridge' ||
-    cat === 'Chain'
-  ) {
-    return 'Infrastructure';
-  }
-  return 'Other';
-}
-
 export function nearestComps(
   protocol: {
     slug: string;
@@ -343,21 +305,21 @@ export interface FarmStep {
 
 export const STEP_TEMPLATES = {
   farm: [
-    'SETUP: Configure dedicated Web3 wallet and ensure RPC endpoints are active for {exec_chain}. Review {name} protocol architecture on defillama.com/protocol/{slug} before initiating interactions.',
-    'VERIFY: Verify smart contract deployment and canonical bridge contracts for {name} on {exec_chain}. Confirm protocol addresses match the official registry on defillama.com/protocol/{slug}.',
-    'FUND: Bridge and fund wallet on {exec_chain} with planned deposit of ${deposit} ({pct_tvl}% of {name}\'s TVL). Account for initial network bridge fee and deposit transaction gas.',
-    'RISK: Establish risk bounds for {category} protocol {name}. Set stop-loss alert if TVL drops below ${exit_tvl} (the {p5}% 7-day quantile drawdown threshold) to trigger immediate de-risking.',
-    'CORE: Deploy ${deposit} into primary {category} liquidity pool or collateral contract of {name} on {exec_chain} to establish baseline active farming balance.',
-    'DEEPEN: Engage secondary protocol features on {name} ({category}) across {exec_chain} to maximize volume and contract interaction footprint according to {horizon}-week blueprint.',
-    'CADENCE: Maintain weekly cadence for {horizon} weeks on {exec_chain}: compound yields, claim reward checkpoints, and rebalance position on {name} to preserve active user qualification.',
-    'WATCH: Monitor weekly protocol performance for {name}. Check defillama.com/protocol/{slug} weekly to verify TVL stays safely above ${exit_tvl} threshold ({p5}% safety line).',
-    'RECORD: Log all interaction hashes, cumulative gas fees, and claimed rewards for {name} on {exec_chain} to track net returns against projected ${net} (${net_hr}/hr).',
-    'UNWIND: At conclusion of {horizon}-week farming plan, withdraw ${deposit} plus accumulated rewards from {name} on {exec_chain}, bridge capital back, and finalize net realization.',
+    'Configure dedicated Web3 wallet and ensure RPC endpoints are active for {exec_chain}. Review {name} protocol architecture on defillama.com/protocol/{slug} before initiating interactions.',
+    'Verify smart contract deployment and canonical bridge contracts for {name} on {exec_chain}. Confirm protocol addresses match the official registry on defillama.com/protocol/{slug}.',
+    'Bridge and fund wallet on {exec_chain} with planned deposit of ${deposit} ({pct_tvl}% of {name}\'s TVL). Account for initial network bridge fee and deposit transaction gas.',
+    'Establish risk bounds for {category} protocol {name}. Set stop-loss alert if TVL drops below ${exit_tvl} (the {p5}% 7-day quantile drawdown threshold) to trigger immediate de-risking.',
+    'Deploy ${deposit} into primary {category} liquidity pool or collateral contract of {name} on {exec_chain} to establish baseline active farming balance.',
+    'Engage secondary protocol features on {name} ({category}) across {exec_chain} to maximize volume and contract interaction footprint according to {horizon}-week blueprint.',
+    'Maintain weekly cadence for {horizon} weeks on {exec_chain}: compound yields, claim reward checkpoints, and rebalance position on {name} to preserve active user qualification.',
+    'Monitor weekly protocol performance for {name}. Check defillama.com/protocol/{slug} weekly to verify TVL stays safely above ${exit_tvl} threshold ({p5}% safety line).',
+    'Log all interaction hashes, cumulative gas fees, and claimed rewards for {name} on {exec_chain} to track net returns against projected ${net} (${net_hr}/hr).',
+    'At conclusion of {horizon}-week farming plan, withdraw ${deposit} plus accumulated rewards from {name} on {exec_chain}, bridge capital back, and finalize net realization.',
   ],
   skip: [
-    'DISQUALIFY: Disqualification filter triggered for {name} on defillama.com/protocol/{slug}: {skip_reason} (P_odds = {p_odds_pct}%, Net EV = ${net}). Capital deployment rejected.',
-    'RATIONALE: Economic analysis confirms farming {name} on {exec_chain} yields negative or sub-threshold return (${net} net vs ${fees} fees). Capital should not be allocated.',
-    'STANDBY: Standby instruction: No capital deployed ($0 gas, $0 deposit). Add {name} to watchlist for structural governance or TVL inflection before re-evaluating.',
+    'Disqualification filter triggered for {name} on defillama.com/protocol/{slug}: {skip_reason} (P_odds = {p_odds_pct}%, Net EV = ${net}). Capital deployment rejected.',
+    'Economic analysis confirms farming {name} on {exec_chain} yields negative or sub-threshold return (${net} net vs ${fees} fees). Capital should not be allocated.',
+    'Standby instruction: No capital deployed ($0 gas, $0 deposit). Add {name} to watchlist for structural governance or TVL inflection before re-evaluating.',
   ],
 };
 
@@ -423,7 +385,7 @@ export function farmSteps10(
 
   const pctTvl = tvl > 0 ? (rRoi.deposit / tvl * 100).toFixed(3) : '0.000';
   const exitTvlStr = formatUsd(rRoi.exit_tvl);
-  const p5Str = p5_7d.toFixed(2);
+  const p5Str = Math.abs(p5_7d).toFixed(2);
 
   const params: Record<string, string> = {
     slug: row.slug,
@@ -511,8 +473,7 @@ export function skipSteps3(
 
   const reasons: string[] = [];
   if (pOdds < 0.25) {
-    reasons.append?.('structural launch probability filter flags P_odds < 0.25') ??
-      reasons.push('structural launch probability filter flags P_odds < 0.25');
+    reasons.push('structural launch probability filter flags P_odds < 0.25');
   }
   if (rRoi.net <= 0) {
     reasons.push('projected net return is negative or zero after fees');
