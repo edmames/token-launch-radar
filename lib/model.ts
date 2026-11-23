@@ -1,49 +1,113 @@
-// lib/model.ts: Token Radar model radar-4.1
-// Ported 1:1 from verify-r41.py (Stages A & B).
+// lib/model.ts: Token Radar model radar-5.2
+// Ported 1:1 from verify-r5.py (Stage A + Stage B Direct Marginal Zero-Inflated Cure + Bootstrap + Stage C).
 // Zero hardcoded protocol names or overrides. Fully deterministic.
 
 import {
-  aucScore,
+  accScore,
   brierScore,
   clip,
   dot,
   huberIrls,
   logLoss,
-  maeLog,
-  medape,
   median,
-  ndcgTop20,
+  Mulberry32,
   quantileSorted,
-  rmsle,
+  round250,
   roundJs,
-  spearman,
+  sigmoid,
+  solveLinear,
+  weightedLogisticIrls,
+  wls,
 } from './stats.ts';
+import {
+  farmSteps,
+  GAS_DEFAULT,
+  GAS_TABLE,
+  nearestComps,
+  stepText,
+} from './farm.ts';
+import type { CompPoolEntry, LiveComp, RoiResult } from './farm.ts';
 
-export const MODEL_VERSION = 'radar-4.1';
+export const MODEL_VERSION = 'radar-5.2';
 export const EARLY_ROWS = 160;
 export const LIVE_ROWS = 24;
 
-export const LAMBDAS = [0.1, 1, 5, 20];
-export const M_SHR_GRID = [5, 10, 20, 50, Infinity];
-export const HUBER_DELTA = 1.35;
-export const HUBER_ITERS = 15;
-export const W0_GRID = [0.0, 0.20, 0.35, 0.50, 0.65, 1.0];
-export const TAU_GRID = [365, 600, 900, 1400, 2400];
-export const M_GRID = [1, 2, 4];
+export const HUBER_DELTA = 0.75;
+export const HUBER_ITERS = 20;
+export const BOOT_SEED = 20261114;
+export const BOOT_REFITS = 200;
+export const CURE_LAMBDAS = [1.0, 4.0, 12.0];
+export const CURE_M_GRID = [1, 2, 4];
+export const CURE_W0_GRID = [0.0, 0.20, 0.35];
 
-export const MACRO_GROUPS: Record<string, string[]> = {
-  Trading: ['Derivatives', 'Dexs', 'Prediction Market', 'Basis Trading', 'Interest Rate Derivatives'],
-  Credit: ['Lending', 'Uncollateralized Lending', 'Yield', 'CDP', 'Dual-Token Stablecoin',
-           'Restaking', 'Collateral Markets', 'Leveraged Farming'],
-  Vaults: ['Onchain Capital Allocator', 'RWA', 'Yield Aggregator', 'Liquidity Manager',
-           'CDP Manager', 'CeDeFi', 'Stablecoin Wrapper', 'Staking Pool', 'Anchor BTC',
-           'Decentralized BTC', 'Farm', 'Indexes', 'Insurance', 'Governance Incentives',
-           'Risk Curators'],
-  Infra: ['Chain', 'Cross Chain Bridge', 'Payments', 'Crypto Card Issuer', 'OTC Marketplace'],
+export const NON_LAUNCH = new Set([
+  'CEX',
+  'Bridge',
+  'Canonical Bridge',
+  'Liquid Staking',
+  'Liquid Restaking',
+  'Restaked BTC',
+]);
+export const NON_LAUNCH_CATEGORIES = NON_LAUNCH;
+export const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
+
+export const AUDIT_SLUGS = [
+  'figure-markets-prime',
+  'defi-saver-asset-management',
+  'lightning-network',
+  'sentora-curator',
+  'hive-protocol',
+  'bittensor-dtao',
+  'usdd',
+  'plume-vaults',
+  'defi-saver',
+];
+
+export const MACRO_GROUPS: Record<string, Set<string>> = {
+  Trading: new Set([
+    'Derivatives',
+    'Dexs',
+    'Prediction Market',
+    'Basis Trading',
+    'Interest Rate Derivatives',
+  ]),
+  Credit: new Set([
+    'Lending',
+    'Uncollateralized Lending',
+    'Yield',
+    'CDP',
+    'Dual-Token Stablecoin',
+    'Restaking',
+    'Collateral Markets',
+    'Leveraged Farming',
+  ]),
+  Vaults: new Set([
+    'Onchain Capital Allocator',
+    'RWA',
+    'Yield Aggregator',
+    'Liquidity Manager',
+    'CDP Manager',
+    'CeDeFi',
+    'Stablecoin Wrapper',
+    'Staking Pool',
+    'Anchor BTC',
+    'Decentralized BTC',
+    'Farm',
+    'Indexes',
+    'Insurance',
+    'Governance Incentives',
+    'Risk Curators',
+  ]),
+  Infra: new Set([
+    'Chain',
+    'Cross Chain Bridge',
+    'Payments',
+    'Crypto Card Issuer',
+    'OTC Marketplace',
+  ]),
 };
 
 export const MACRO_EXT: Record<string, string> = {
-  // L_match unmapped (affect the final fit):
   Options: 'Trading',
   DOR: 'Trading',
   'Collateral Management': 'Credit',
@@ -53,13 +117,11 @@ export const MACRO_EXT: Record<string, string> = {
   'NFT Marketplace': 'Infra',
   Privacy: 'Infra',
   'Token Locker': 'Vaults',
-  // L_all-only unmapped (audit + board-row offsets):
   Bridge: 'Infra',
   'Canonical Bridge': 'Infra',
   'Liquid Staking': 'Vaults',
   'Liquid Restaking': 'Vaults',
   'Restaked BTC': 'Vaults',
-  // Remaining snapshot categories (board rows only):
   'Algo-Stables': 'Credit',
   'Options Vault': 'Trading',
   'Reserve Currency': 'Vaults',
@@ -67,20 +129,16 @@ export const MACRO_EXT: Record<string, string> = {
   Synthetics: 'Trading',
 };
 
-const _CAT2MACRO: Record<string, string> = {};
+const _CAT2MACRO = new Map<string, string>();
 for (const [g, cs] of Object.entries(MACRO_GROUPS)) {
-  for (const c of cs) {
-    _CAT2MACRO[c] = g;
-  }
+  for (const c of cs) _CAT2MACRO.set(c, g);
 }
-Object.assign(_CAT2MACRO, MACRO_EXT);
+for (const [c, g] of Object.entries(MACRO_EXT)) {
+  _CAT2MACRO.set(c, g);
+}
 
 export function macroGroup(cat: string | null): string {
-  const g = _CAT2MACRO[cat ?? 'Unknown'];
-  if (g === undefined) {
-    throw new Error(`unmapped category: ${JSON.stringify(cat)} — add to MACRO_EXT`);
-  }
-  return g;
+  return _CAT2MACRO.get(cat || 'Unknown') ?? 'Trading';
 }
 
 export const SVC_CATS = new Set([
@@ -94,16 +152,23 @@ export const SVC_CATS = new Set([
   'Staking Pool',
   'CDP Manager',
 ]);
-
 export const NET_CATS = new Set([
   'Payments',
   'Cross Chain Bridge',
   'Staking Pool',
   'Risk Curators',
 ]);
-
-export const SVC_RE = /\b(?:curator|curation|financial|capital|asset management|gateway|pooling|hub|exchange|prime|by)\b/i;
+export const SVC_RE =
+  /\b(?:curator|curation|financial|capital|asset management|gateway|pooling|hub|exchange|prime|by)\b/i;
 export const NET_RE = /\bnetwork\b/i;
+
+export function isService(p: { category: string | null; name: string }): boolean {
+  const cat = p.category || '';
+  const name = p.name || '';
+  if (SVC_CATS.has(cat) && SVC_RE.test(name)) return true;
+  if (NET_CATS.has(cat) && NET_RE.test(name)) return true;
+  return false;
+}
 
 export interface SnapshotProtocol {
   slug: string;
@@ -121,7 +186,6 @@ export interface SnapshotProtocol {
 export interface Snapshot {
   as_of: string;
   source: string;
-  floor_usd: number;
   protocols: SnapshotProtocol[];
   watchlist: string[];
 }
@@ -133,19 +197,10 @@ export class SnapshotError extends Error {
   }
 }
 
-export const NON_LAUNCH = new Set([
-  'CEX',
-  'Bridge',
-  'Canonical Bridge',
-  'Liquid Staking',
-  'Liquid Restaking',
-  'Restaked BTC',
-]);
-export const NON_LAUNCH_CATEGORIES = NON_LAUNCH;
-export const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
-
-export function normWord(s: string): string {
-  const w = (s.trim().split(/[\s_-]+/)[0] || '').toLowerCase();
+export function normWord(s: string | null): string {
+  const str = (s ?? '').trim();
+  if (!str) return '';
+  const w = str.split(/[\s_-]+/)[0]!.toLowerCase();
   return w.replace(/[^a-z0-9]/g, '');
 }
 
@@ -154,1357 +209,93 @@ export function isPreToken(p: SnapshotProtocol): boolean {
 }
 
 export function isRankable(p: SnapshotProtocol): boolean {
-  return isPreToken(p) && !NON_LAUNCH.has(p.category ?? '') && !VERSIONED.test(p.name);
+  return (
+    isPreToken(p) &&
+    !NON_LAUNCH.has(p.category || '') &&
+    !VERSIONED.test(p.name)
+  );
 }
 
-export function ageDays(asOf: string, listedAt: string | null): number | null {
-  if (listedAt === null) return null;
-  const a = Date.parse(`${asOf}T00:00:00Z`);
-  const b = Date.parse(`${listedAt}T00:00:00Z`);
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
-  return Math.max(0, Math.floor((a - b) / 86_400_000));
+export function ageDays(asOfStr: string, listedAtStr: string | null): number | null {
+  if (listedAtStr === null) return null;
+  const [y0, m0, d0] = asOfStr.split('-').map(Number);
+  const [y1, m1, d1] = listedAtStr.split('-').map(Number);
+  const t0 = Date.UTC(y0!, m0! - 1, d0!);
+  const t1 = Date.UTC(y1!, m1! - 1, d1!);
+  return Math.max(0, Math.round((t0 - t1) / (24 * 3600 * 1000)));
 }
 
-// ---------------- Stage A ----------------
-
-export interface BaseCtx {
-  bounds: [number, number];
-  age_mean: number;
+export function blueprint(cat: string | null): [number, number, number] {
+  if (
+    cat === 'Derivatives' ||
+    cat === 'Prediction Market' ||
+    cat === 'Interest Rate Derivatives'
+  ) {
+    return [105, 10, 8];
+  }
+  if (cat === 'Dexs' || cat === 'Chain') {
+    return [95, 10, 6];
+  }
+  return [85, 10, 4];
 }
 
-export interface AblationRow {
-  model: string;
-  rmsle: number;
-  mae_log: number;
-  medape: number;
-  spearman_mean_fold: number;
-  spearman_pooled: number;
-  ndcg20: number;
-  delta: number | null;
-  delta_mae?: number | null;
-  kept: boolean;
-  m_shr_per_fold?: Array<string | null> | null;
+export function getCheapestChain(
+  p: { chains?: string[] },
+  tx: number,
+): [string, number, number] {
+  let best: [number, string, number, number] | null = null;
+  for (const ch of p.chains ?? []) {
+    const [g, b] = (GAS_TABLE as Record<string, [number, number]>)[ch] ?? GAS_DEFAULT;
+    const cost = b + tx * g;
+    if (best === null || cost < best[0]) {
+      best = [cost, ch, g, b];
+    }
+  }
+  if (best === null) {
+    return ['(none)', GAS_DEFAULT[0], GAS_DEFAULT[1]];
+  }
+  return [best[1], best[2], best[3]];
 }
 
-export interface ConformalResult {
-  med_r: number;
-  q10: number;
-  q90: number;
-  coverage_pct: number;
-  n: number;
+export function computeChainMedians(
+  cohort: { change_7d?: number | null; chains?: string[] }[],
+): Map<string, number> {
+  const byChain = new Map<string, number[]>();
+  for (const p of cohort) {
+    if (p.change_7d !== null && p.change_7d !== undefined) {
+      for (const c of p.chains ?? []) {
+        let list = byChain.get(c);
+        if (!list) {
+          list = [];
+          byChain.set(c, list);
+        }
+        list.push(p.change_7d);
+      }
+    }
+  }
+  const res = new Map<string, number>();
+  for (const [c, list] of byChain.entries()) {
+    res.set(c, median(list));
+  }
+  return res;
 }
 
-export class StageA {
-  snap: Snapshot;
-  asOf: string;
-  cohort: 'match' | 'all';
-  L: SnapshotProtocol[];
-  chainMed: Record<string, number>;
-  n_g: Record<string, number>;
-
-  constructor(snap: Snapshot, cohort: 'match' | 'all') {
-    this.snap = snap;
-    this.asOf = snap.as_of;
-    this.cohort = cohort;
-    const LAll = snap.protocols.filter(
-      (p) => (p.mcap_usd ?? 0) > 0 && p.tvl_usd >= 1e6 && p.category !== 'CEX',
-    );
-    if (cohort === 'match') {
-      this.L = LAll.filter(
-        (p) => !NON_LAUNCH.has(p.category ?? '') && !VERSIONED.test(p.name),
-      );
-    } else {
-      this.L = LAll;
-    }
-
-    const byChain: Record<string, number[]> = {};
-    for (const p of snap.protocols) {
-      if (p.change_7d !== null) {
-        for (const c of p.chains) {
-          if (!byChain[c]) byChain[c] = [];
-          byChain[c]!.push(p.change_7d);
-        }
-      }
-    }
-    this.chainMed = {};
-    for (const [c, v] of Object.entries(byChain)) {
-      this.chainMed[c] = median(v);
-    }
-
-    this.n_g = {};
-    for (const p of this.L) {
-      const g = macroGroup(p.category);
-      this.n_g[g] = (this.n_g[g] ?? 0) + 1;
-    }
+export function calcX3(
+  p: { change_7d?: number | null; chains?: string[] },
+  medians: Map<string, number>,
+): number {
+  if (p.change_7d === null || p.change_7d === undefined) return 0.0;
+  const meds: number[] = [];
+  for (const c of p.chains ?? []) {
+    const m = medians.get(c);
+    if (m !== undefined) meds.push(m);
   }
-
-  folds(items: SnapshotProtocol[]): SnapshotProtocol[][] {
-    const s = items.slice().sort((a, b) => {
-      const ga = macroGroup(a.category);
-      const gb = macroGroup(b.category);
-      if (ga < gb) return -1;
-      if (ga > gb) return 1;
-      if (a.tvl_usd !== b.tvl_usd) return a.tvl_usd - b.tvl_usd;
-      if (a.slug < b.slug) return -1;
-      if (a.slug > b.slug) return 1;
-      return 0;
-    });
-    const f: SnapshotProtocol[][] = [[], [], [], [], []];
-    for (let i = 0; i < s.length; i++) {
-      f[i % 5]!.push(s[i]!);
-    }
-    return f;
-  }
-
-  x3(p: SnapshotProtocol): number {
-    if (p.change_7d === null) return 0.0;
-    const meds: number[] = [];
-    for (const c of p.chains) {
-      if (this.chainMed[c] !== undefined) {
-        meds.push(this.chainMed[c]!);
-      }
-    }
-    const gbar = meds.length > 0 ? meds.reduce((a, b) => a + b, 0) / meds.length : 0.0;
-    return Math.max(-40.0, Math.min(80.0, p.change_7d - gbar)) / 100.0;
-  }
-
-  winsorBounds(train: SnapshotProtocol[]): [number, number] {
-    const lr = train.map((p) => Math.log(p.mcap_usd! / p.tvl_usd)).sort((a, b) => a - b);
-    return [quantileSorted(lr, 0.05), quantileSorted(lr, 0.95)];
-  }
-
-  yWinsor(p: SnapshotProtocol, bounds: [number, number]): number {
-    const [q05, q95] = bounds;
-    const lr = Math.log(p.mcap_usd! / p.tvl_usd);
-    return Math.log(p.tvl_usd) + Math.max(q05, Math.min(q95, lr));
-  }
-
-  baseCtx(train: SnapshotProtocol[]): BaseCtx {
-    const ages: number[] = [];
-    for (const p of train) {
-      const a = ageDays(this.asOf, p.listed_at);
-      if (a !== null) {
-        ages.push(Math.log(1 + a));
-      }
-    }
-    const ageMean = ages.length > 0 ? ages.reduce((a, b) => a + b, 0) / ages.length : 0.0;
-    return {
-      bounds: this.winsorBounds(train),
-      age_mean: ageMean,
-    };
-  }
-
-  featVal(p: SnapshotProtocol, ctx: BaseCtx, f: string): number {
-    if (f === 'x1') return Math.log(p.tvl_usd);
-    if (f === 'x3') return this.x3(p);
-    if (f === 'x4') {
-      const a = ageDays(this.asOf, p.listed_at);
-      return a !== null ? Math.log(1 + a) : ctx.age_mean;
-    }
-    if (f === 'x5') return Math.log(Math.max(1, p.chains.length));
-    throw new Error(`unknown feature ${f}`);
-  }
-
-  featVec(p: SnapshotProtocol, ctx: BaseCtx, freeFeats: string[]): number[] {
-    return [1.0, ...freeFeats.map((f) => this.featVal(p, ctx, f))];
-  }
-
-  fitM1(train: SnapshotProtocol[], ctx: BaseCtx, lam: number): number[] {
-    const X = train.map((p) => [1.0, Math.log(p.tvl_usd)]);
-    const y = train.map((p) => this.yWinsor(p, ctx.bounds));
-    return huberIrls(X, y, lam);
-  }
-
-  alphaFromM1(
-    train: SnapshotProtocol[],
-    ctx: BaseCtx,
-    betaM1: number[],
-    mShr: number,
-  ): Record<string, number> {
-    const res: Record<string, number[]> = {};
-    for (const p of train) {
-      const r = this.yWinsor(p, ctx.bounds) - (betaM1[0]! + betaM1[1]! * Math.log(p.tvl_usd));
-      const g = macroGroup(p.category);
-      if (!res[g]) res[g] = [];
-      res[g]!.push(r);
-    }
-    const out: Record<string, number> = {};
-    for (const [g, v] of Object.entries(res)) {
-      const n = v.length;
-      const shrink = mShr === Infinity ? 0.0 : n / (n + mShr);
-      out[g] = shrink * median(v);
-    }
-    return out;
-  }
-
-  fitOffsetModel(
-    train: SnapshotProtocol[],
-    ctx: BaseCtx,
-    alpha: Record<string, number>,
-    freeFeats: string[],
-    lam: number,
-  ): number[] {
-    const X = train.map((p) => this.featVec(p, ctx, freeFeats));
-    const y = train.map((p) => this.yWinsor(p, ctx.bounds) - (alpha[macroGroup(p.category)] ?? 0.0));
-    return huberIrls(X, y, lam);
-  }
-
-  predict(
-    p: SnapshotProtocol,
-    ctx: BaseCtx,
-    alpha: Record<string, number>,
-    beta: number[],
-    freeFeats: string[],
-  ): number {
-    return dot(this.featVec(p, ctx, freeFeats), beta) + (alpha[macroGroup(p.category)] ?? 0.0);
-  }
-
-  tuneLamM1(train: SnapshotProtocol[]): number {
-    const f = this.folds(train);
-    let bestLam = LAMBDAS[0]!;
-    let bestErr = Infinity;
-    for (const lam of LAMBDAS) {
-      let se = 0.0;
-      let n = 0;
-      for (let k = 0; k < 5; k++) {
-        const tr: SnapshotProtocol[] = [];
-        for (let j = 0; j < 5; j++) {
-          if (j !== k) tr.push(...f[j]!);
-        }
-        const te = f[k]!;
-        const ctx = this.baseCtx(tr);
-        const beta = this.fitM1(tr, ctx, lam);
-        for (const p of te) {
-          const yh = beta[0]! + beta[1]! * Math.log(p.tvl_usd);
-          se += (yh - Math.log(p.mcap_usd!)) ** 2;
-          n++;
-        }
-      }
-      const err = Math.sqrt(se / n);
-      if (err < bestErr) {
-        bestErr = err;
-        bestLam = lam;
-      }
-    }
-    return bestLam;
-  }
-
-  tuneOffset(train: SnapshotProtocol[], lamM1: number, freeFeats: string[]): [number, number] {
-    const f = this.folds(train);
-    const pre: Array<{
-      tr: SnapshotProtocol[];
-      te: SnapshotProtocol[];
-      ctx: BaseCtx;
-      alphas: Record<string, Record<string, number>>;
-    }> = [];
-    for (let k = 0; k < 5; k++) {
-      const tr: SnapshotProtocol[] = [];
-      for (let j = 0; j < 5; j++) {
-        if (j !== k) tr.push(...f[j]!);
-      }
-      const te = f[k]!;
-      const ctx = this.baseCtx(tr);
-      const b1 = this.fitM1(tr, ctx, lamM1);
-      const alphas: Record<string, Record<string, number>> = {};
-      for (const m of M_SHR_GRID) {
-        alphas[String(m)] = this.alphaFromM1(tr, ctx, b1, m);
-      }
-      pre.push({ tr, te, ctx, alphas });
-    }
-    let best: [number, number] = [LAMBDAS[0]!, M_SHR_GRID[0]!];
-    let bestErr = Infinity;
-    for (const mShr of M_SHR_GRID) {
-      for (const lam of LAMBDAS) {
-        let se = 0.0;
-        let n = 0;
-        for (const item of pre) {
-          const alpha = item.alphas[String(mShr)]!;
-          const beta = this.fitOffsetModel(item.tr, item.ctx, alpha, freeFeats, lam);
-          for (const p of item.te) {
-            const yh = this.predict(p, item.ctx, alpha, beta, freeFeats);
-            se += (yh - Math.log(p.mcap_usd!)) ** 2;
-            n++;
-          }
-        }
-        const err = Math.sqrt(se / n);
-        if (err < bestErr) {
-          bestErr = err;
-          best = [lam, mShr];
-        }
-      }
-    }
-    return best;
-  }
-
-  tuneLamOffset(train: SnapshotProtocol[], lamM1: number, mShr: number, freeFeats: string[]): number {
-    const f = this.folds(train);
-    const pre: Array<{
-      tr: SnapshotProtocol[];
-      te: SnapshotProtocol[];
-      ctx: BaseCtx;
-      alpha: Record<string, number>;
-    }> = [];
-    for (let k = 0; k < 5; k++) {
-      const tr: SnapshotProtocol[] = [];
-      for (let j = 0; j < 5; j++) {
-        if (j !== k) tr.push(...f[j]!);
-      }
-      const te = f[k]!;
-      const ctx = this.baseCtx(tr);
-      const b1 = this.fitM1(tr, ctx, lamM1);
-      const alpha = this.alphaFromM1(tr, ctx, b1, mShr);
-      pre.push({ tr, te, ctx, alpha });
-    }
-    let bestLam = LAMBDAS[0]!;
-    let bestErr = Infinity;
-    for (const lam of LAMBDAS) {
-      let se = 0.0;
-      let n = 0;
-      for (const item of pre) {
-        const beta = this.fitOffsetModel(item.tr, item.ctx, item.alpha, freeFeats, lam);
-        for (const p of item.te) {
-          const yh = this.predict(p, item.ctx, item.alpha, beta, freeFeats);
-          se += (yh - Math.log(p.mcap_usd!)) ** 2;
-          n++;
-        }
-      }
-      const err = Math.sqrt(se / n);
-      if (err < bestErr) {
-        bestErr = err;
-        bestLam = lam;
-      }
-    }
-    return bestLam;
-  }
-
-  oofFor(
-    freeFeats: string[],
-    useOffset: boolean,
-    mShrPerFold: Array<number | null> | null = null,
-  ): [Array<[number, number, string, number]>, Array<number | null>] {
-    const f = this.folds(this.L);
-    const out: Array<[number, number, string, number]> = [];
-    const mshrs: Array<number | null> = [];
-    for (let k = 0; k < 5; k++) {
-      const train: SnapshotProtocol[] = [];
-      for (let j = 0; j < 5; j++) {
-        if (j !== k) train.push(...f[j]!);
-      }
-      const test = f[k]!;
-      const ctx = this.baseCtx(train);
-      const lamM1 = this.tuneLamM1(train);
-      let alpha: Record<string, number> = {};
-      let beta: number[] = [];
-
-      if (!useOffset) {
-        const lam = this.tuneLamOffset(train, lamM1, Infinity, freeFeats);
-        beta = this.fitOffsetModel(train, ctx, {}, freeFeats, lam);
-        mshrs.push(null);
-      } else if (mShrPerFold === null) {
-        const [lam, mShr] = this.tuneOffset(train, lamM1, freeFeats);
-        const b1 = this.fitM1(train, ctx, lamM1);
-        alpha = this.alphaFromM1(train, ctx, b1, mShr);
-        beta = this.fitOffsetModel(train, ctx, alpha, freeFeats, lam);
-        mshrs.push(mShr);
-      } else {
-        const mShr = mShrPerFold[k]!;
-        const lam = this.tuneLamOffset(train, lamM1, mShr, freeFeats);
-        const b1 = this.fitM1(train, ctx, lamM1);
-        alpha = this.alphaFromM1(train, ctx, b1, mShr);
-        beta = this.fitOffsetModel(train, ctx, alpha, freeFeats, lam);
-        mshrs.push(mShr);
-      }
-
-      for (const p of test) {
-        const yh = this.predict(p, ctx, alpha, beta, freeFeats);
-        out.push([Math.log(p.mcap_usd!), yh, p.slug, k]);
-      }
-    }
-    return [out, mshrs];
-  }
-
-  metrics(oof: Array<[number, number, string, number]>): {
-    rmsle: number;
-    mae_log: number;
-    medape: number;
-    spearman_mean_fold: number;
-    spearman_pooled: number;
-    ndcg20: number;
-  } {
-    const pairs: [number, number][] = oof.map((r) => [r[0], r[1]]);
-    const byFold: Record<number, Array<[number, number]>> = {};
-    for (const [y, yh, , k] of oof) {
-      if (!byFold[k]) byFold[k] = [];
-      byFold[k]!.push([y, yh]);
-    }
-    let foldSpSum = 0.0;
-    const foldCount = Object.keys(byFold).length;
-    for (const v of Object.values(byFold)) {
-      foldSpSum += spearman(
-        v.map((p) => p[0]),
-        v.map((p) => p[1]),
-      );
-    }
-    const meanSp = foldCount > 0 ? foldSpSum / foldCount : 0.0;
-    const actuals = pairs.map((p) => p[0]);
-    const preds = pairs.map((p) => p[1]);
-
-    return {
-      rmsle: rmsle(pairs),
-      mae_log: maeLog(pairs),
-      medape: medape(pairs),
-      spearman_mean_fold: meanSp,
-      spearman_pooled: spearman(actuals, preds),
-      ndcg20: ndcgTop20(actuals, preds),
-    };
-  }
-
-  ablation(): {
-    table: AblationRow[];
-    kept: [string[], boolean];
-    keptMshrs: Array<number | null> | null;
-    oofFinal: Array<[number, number, string, number]>;
-  } {
-    const pairs0: [number, number][] = this.L.map((p) => [
-      Math.log(p.mcap_usd!),
-      Math.log(0.25 * p.tvl_usd),
-    ]);
-    const folds0 = this.folds(this.L);
-    const byFold0: Record<number, Array<[number, number]>> = {};
-    for (let k = 0; k < folds0.length; k++) {
-      byFold0[k] = folds0[k]!.map((p) => [
-        Math.log(p.mcap_usd!),
-        Math.log(0.25 * p.tvl_usd),
-      ]);
-    }
-    let foldSp0 = 0.0;
-    for (let k = 0; k < 5; k++) {
-      const v = byFold0[k]!;
-      foldSp0 += spearman(
-        v.map((p) => p[0]),
-        v.map((p) => p[1]),
-      );
-    }
-    const actuals0 = pairs0.map((p) => p[0]);
-    const preds0 = pairs0.map((p) => p[1]);
-
-    const m0: AblationRow = {
-      model: 'M0',
-      rmsle: rmsle(pairs0),
-      mae_log: maeLog(pairs0),
-      medape: medape(pairs0),
-      spearman_mean_fold: foldSp0 / 5,
-      spearman_pooled: spearman(actuals0, preds0),
-      ndcg20: ndcgTop20(actuals0, preds0),
-      delta: null,
-      kept: true,
-    };
-
-    const table: AblationRow[] = [m0];
-    let prevR = m0.rmsle;
-    let prevM = m0.mae_log;
-    let keptFree: string[] = ['x1'];
-    let keptOff = false;
-    let keptMshrs: Array<number | null> | null = null;
-    let oofFinal: Array<[number, number, string, number]> = [];
-
-    const runStage = (
-      name: string,
-      freeFeats: string[],
-      useOffset: boolean,
-      mShrPerFold: Array<number | null> | null,
-      gated: boolean,
-    ): boolean => {
-      const [oof, mshrs] = this.oofFor(freeFeats, useOffset, mShrPerFold);
-      const mt = this.metrics(oof);
-      const dR = prevR - mt.rmsle;
-      const dM = prevM - mt.mae_log;
-      const keep = !gated ? true : dR >= 0.002 || (dM >= 0.005 && dR >= -0.005);
-      table.push({
-        model: name,
-        ...mt,
-        delta: dR,
-        delta_mae: dM,
-        kept: keep,
-        m_shr_per_fold: useOffset
-          ? mshrs.map((v) => (v === null ? null : v === Infinity ? 'inf' : String(v)))
-          : null,
-      });
-      if (keep) {
-        prevR = mt.rmsle;
-        prevM = mt.mae_log;
-        keptFree = freeFeats.slice();
-        keptOff = useOffset;
-        keptMshrs = mshrs;
-        oofFinal = oof;
-      }
-      return keep;
-    };
-
-    runStage('M1', ['x1'], false, null, false);
-    runStage('M2', ['x1'], true, null, true);
-    runStage('M3', [...keptFree, 'x3'], keptOff, keptMshrs, true);
-    runStage('M4', [...keptFree, 'x4'], keptOff, keptMshrs, true);
-    runStage('M5', [...keptFree, 'x5'], keptOff, keptMshrs, true);
-
-    return {
-      table,
-      kept: [keptFree, keptOff],
-      keptMshrs,
-      oofFinal,
-    };
-  }
-
-  conformal(oofFinal: Array<[number, number, string, number]>): ConformalResult {
-    const bySlug = new Map<string, SnapshotProtocol>(this.L.map((p) => [p.slug, p]));
-    const res: Array<[number, number, number]> = [];
-    for (const [y, yh, slug] of oofFinal) {
-      const p = bySlug.get(slug)!;
-      const s = Math.sqrt(1 + 1 / (this.n_g[macroGroup(p.category)]! + 3));
-      res.push([y, yh, s]);
-    }
-    const medR = median(res.map((r) => r[0] - r[1]));
-    const u = res.map((r) => (r[0] - r[1]) / r[2]).sort((a, b) => a - b);
-    const N = u.length;
-    const q10 = u[Math.max(0, Math.floor(0.10 * (N + 1)) - 1)]!;
-    const q90 = u[Math.min(N - 1, Math.ceil(0.90 * (N + 1)) - 1)]!;
-
-    let inside = 0;
-    for (let i = 0; i < res.length; i++) {
-      const uLoo: number[] = [];
-      for (let j = 0; j < res.length; j++) {
-        if (j !== i) {
-          const r = res[j]!;
-          uLoo.push((r[0] - r[1]) / r[2]);
-        }
-      }
-      uLoo.sort((a, b) => a - b);
-      const n2 = uLoo.length;
-      const q10l = uLoo[Math.max(0, Math.floor(0.10 * (n2 + 1)) - 1)]!;
-      const q90l = uLoo[Math.min(n2 - 1, Math.ceil(0.90 * (n2 + 1)) - 1)]!;
-      const [y, yh, s] = res[i]!;
-      if (yh + s * q10l <= y && y <= yh + s * q90l) {
-        inside++;
-      }
-    }
-
-    return {
-      med_r: medR,
-      q10,
-      q90,
-      coverage_pct: (100.0 * inside) / N,
-      n: N,
-    };
-  }
-
-  finalModel(
-    kept: [string[], boolean],
-    _keptMshrs: Array<number | null> | null,
-  ): {
-    ctx: BaseCtx;
-    alpha: Record<string, number>;
-    beta: number[];
-    lam: number;
-    m_shr: number | null;
-    lam_m1: number;
-  } {
-    const [freeFeats, useOffset] = kept;
-    const ctx = this.baseCtx(this.L);
-    const lamM1 = this.tuneLamM1(this.L);
-    if (!useOffset) {
-      const lam = this.tuneLamOffset(this.L, lamM1, Infinity, freeFeats);
-      const beta = this.fitOffsetModel(this.L, ctx, {}, freeFeats, lam);
-      return { ctx, alpha: {}, beta, lam, m_shr: null, lam_m1: lamM1 };
-    }
-    const [lam, mShr] = this.tuneOffset(this.L, lamM1, freeFeats);
-    const b1 = this.fitM1(this.L, ctx, lamM1);
-    const alpha = this.alphaFromM1(this.L, ctx, b1, mShr);
-    const beta = this.fitOffsetModel(this.L, ctx, alpha, freeFeats, lam);
-    return { ctx, alpha, beta, lam, m_shr: mShr, lam_m1: lamM1 };
-  }
+  const gbar = meds.length > 0 ? meds.reduce((a, b) => a + b, 0.0) / meds.length : 0.0;
+  return clip(p.change_7d - gbar, -40.0, 80.0) / 100.0;
 }
 
-// ---------------- Stage B ----------------
-
-export interface CureFitResult {
-  logloss: number;
-  w0: number;
-  tau: number;
-  m: number;
-  p0_asym: number;
-  pi_asym: Record<string, number>;
-  med_age: number;
-}
-
-export interface StageBCvResult {
-  b0: { auc: number; brier: number };
-  b1: { auc: number; brier: number };
-  b2: { auc: number; brier: number };
-  b3: { auc: number; brier: number; base: string };
-  final: {
-    auc: number;
-    brier: number;
-    keep_F: boolean;
-    keep_dsvc: boolean;
-    bss: number;
-  };
-  fold_params: Array<{
-    m_b1: number;
-    w0: number;
-    tau: number;
-    m_cure: number;
-    d_svc: number;
-  }>;
-}
-
-export class StageB {
-  snap: Snapshot;
-  asOf: string;
-  non_cex: SnapshotProtocol[];
-  p0: number;
-  liveBrands: Set<string>;
-  liveEcoChains: Set<string>;
-  keep_F: boolean = false;
-  keep_dsvc: boolean = false;
-  m_b1: number = 1;
-  p0_full: number = 0.5;
-  pi_full: Record<string, number> = {};
-  cure_full!: CureFitResult;
-  dsvc_full: number = 1.0;
-  dsvc_stats: [number, number, number] = [0, 0, 0];
-
-  constructor(snap: Snapshot) {
-    this.snap = snap;
-    this.asOf = snap.as_of;
-    this.non_cex = snap.protocols.filter((p) => p.category !== 'CEX');
-    let nonPre = 0;
-    for (const p of this.non_cex) {
-      if (!isPreToken(p)) nonPre++;
-    }
-    this.p0 = nonPre / this.non_cex.length;
-
-    this.liveBrands = new Set<string>();
-    for (const p of snap.protocols) {
-      if (!isPreToken(p)) {
-        const fw = normWord(p.name);
-        if (fw.length >= 4) this.liveBrands.add(fw);
-        if (p.symbol) {
-          const sw = normWord(p.symbol);
-          if (sw.length >= 4) this.liveBrands.add(sw);
-        }
-      }
-    }
-
-    this.liveEcoChains = new Set<string>();
-    for (const p of snap.protocols) {
-      if (!isPreToken(p)) {
-        for (const ch of p.chains) {
-          this.liveEcoChains.add(ch);
-        }
-      }
-    }
-  }
-
-  y(p: SnapshotProtocol): number {
-    return !isPreToken(p) ? 1 : 0;
-  }
-
-  targetName(): string {
-    return '!isPreToken';
-  }
-
-  isService(p: SnapshotProtocol): boolean {
-    const cat = p.category ?? '';
-    const name = p.name ?? '';
-    if (SVC_CATS.has(cat) && SVC_RE.test(name)) return true;
-    if (NET_CATS.has(cat) && NET_RE.test(name)) return true;
-    return false;
-  }
-
-  dServiceFit(train: SnapshotProtocol[]): [number, [number, number, number]] {
-    const svc = train.filter((p) => this.isService(p));
-    let k = 0;
-    for (const p of svc) {
-      k += this.y(p);
-    }
-    const n = svc.length;
-    let sumY = 0;
-    for (const p of train) {
-      sumY += this.y(p);
-    }
-    const p0 = sumY / train.length;
-    const d = p0 > 0 ? clip(((k + 0.5) / (n + 2)) / p0, 0.05, 0.45) : 0.45;
-    return [d, [k, n, p0]];
-  }
-
-  cureFit(train: SnapshotProtocol[]): CureFitResult {
-    const ages: number[] = [];
-    for (const p of train) {
-      if (p.listed_at !== null) {
-        const a = ageDays(this.asOf, p.listed_at);
-        if (a !== null) ages.push(a);
-      }
-    }
-    const medAge = ages.length > 0 ? median(ages) : 365.0;
-    const ys = train.map((p) => this.y(p));
-    const ts = train.map((p) => {
-      const a = ageDays(this.asOf, p.listed_at);
-      return a !== null ? a : medAge;
-    });
-    const cats = train.map((p) => p.category ?? 'Unknown');
-
-    let best: {
-      ll: number;
-      w0: number;
-      tau: number;
-      m: number;
-      p0_asym: number;
-      pi_asym: Record<string, number>;
-    } | null = null;
-
-    for (const w0 of W0_GRID) {
-      for (const tau of TAU_GRID) {
-        const F = ts.map((t) => 1 - (1 - w0) * Math.exp(-t / tau));
-        let sumF = 0.0;
-        let sumY = 0.0;
-        for (let i = 0; i < F.length; i++) {
-          sumF += F[i]!;
-          sumY += ys[i]!;
-        }
-        const p0Asym = sumF > 0 ? clip(sumY / sumF, 0.05, 0.95) : 0.5;
-
-        const kC: Record<string, number> = {};
-        const sFC: Record<string, number> = {};
-        for (let i = 0; i < cats.length; i++) {
-          const c = cats[i]!;
-          kC[c] = (kC[c] ?? 0) + ys[i]!;
-          sFC[c] = (sFC[c] ?? 0) + F[i]!;
-        }
-
-        const uniqueCats = Object.keys(kC);
-        for (const m of M_GRID) {
-          const pi: Record<string, number> = {};
-          for (const c of uniqueCats) {
-            pi[c] = clip((kC[c]! + m * p0Asym) / (sFC[c]! + m), 0.01, 0.95);
-          }
-
-          let ll = 0.0;
-          for (let i = 0; i < train.length; i++) {
-            const c = cats[i]!;
-            const y = ys[i]!;
-            const f = F[i]!;
-            const ph = clip(pi[c]! * f, 1e-6, 1 - 1e-6);
-            ll += -(y * Math.log(ph) + (1 - y) * Math.log(1 - ph));
-          }
-          ll /= train.length;
-
-          if (best === null || ll < best.ll - 1e-12) {
-            best = { ll, w0, tau, m, p0_asym: p0Asym, pi_asym: pi };
-          }
-        }
-      }
-    }
-
-    return {
-      logloss: best!.ll,
-      w0: best!.w0,
-      tau: best!.tau,
-      m: best!.m,
-      p0_asym: best!.p0_asym,
-      pi_asym: best!.pi_asym,
-      med_age: medAge,
-    };
-  }
-
-  piFit(train: SnapshotProtocol[], m: number): [number, Record<string, number>] {
-    let sumY = 0;
-    const kC: Record<string, number> = {};
-    const nC: Record<string, number> = {};
-    for (const p of train) {
-      const y = this.y(p);
-      sumY += y;
-      const c = p.category ?? 'Unknown';
-      kC[c] = (kC[c] ?? 0) + y;
-      nC[c] = (nC[c] ?? 0) + 1;
-    }
-    const p0 = sumY / train.length;
-    const pi: Record<string, number> = {};
-    for (const [c, n] of Object.entries(nC)) {
-      pi[c] = (kC[c]! + m * p0) / (n + m);
-    }
-    return [p0, pi];
-  }
-
-  tuneMInner(train: SnapshotProtocol[]): number {
-    const rows = train.slice().sort((a, b) => {
-      const ca = a.category ?? 'Unknown';
-      const cb = b.category ?? 'Unknown';
-      if (ca < cb) return -1;
-      if (ca > cb) return 1;
-      if (a.tvl_usd !== b.tvl_usd) return a.tvl_usd - b.tvl_usd;
-      if (a.slug < b.slug) return -1;
-      if (a.slug > b.slug) return 1;
-      return 0;
-    });
-
-    const folds: SnapshotProtocol[][] = [[], [], [], [], []];
-    for (let i = 0; i < rows.length; i++) {
-      folds[i % 5]!.push(rows[i]!);
-    }
-
-    let bestM = M_GRID[0]!;
-    let bestLl = Infinity;
-
-    for (const m of M_GRID) {
-      const labels: number[] = [];
-      const scores: number[] = [];
-      for (let k = 0; k < 5; k++) {
-        const tr: SnapshotProtocol[] = [];
-        for (let j = 0; j < 5; j++) {
-          if (j !== k) tr.push(...folds[j]!);
-        }
-        const te = folds[k]!;
-        const [p0, pi] = this.piFit(tr, m);
-        for (const p of te) {
-          labels.push(this.y(p));
-          scores.push(pi[p.category ?? 'Unknown'] ?? p0);
-        }
-      }
-      const ll = logLoss(labels, scores);
-      if (ll < bestLl) {
-        bestLl = ll;
-        bestM = m;
-      }
-    }
-    return bestM;
-  }
-
-  gates(p: SnapshotProtocol): [number, number, number] {
-    const fw = normWord(p.name);
-    const isPegged = (
-      p.category === 'CDP' &&
-      /^usd[a-z0-9]{1,2}$/i.test(p.name.trim()) &&
-      p.tvl_usd > 500_000_000
-    );
-    const dParent = ((fw.length >= 4 && this.liveBrands.has(fw)) || isPegged) ? 0.05 : 1.0;
-
-    let chainMatch = false;
-    for (const ch of p.chains) {
-      const cw = normWord(ch);
-      if (cw.length >= 4 && fw.length >= 4 && (cw === fw || fw.startsWith(cw) || cw.startsWith(fw))) {
-        chainMatch = true;
-        break;
-      }
-    }
-    const dChainSub = (p.category === 'Chain' && p.chains.length > 0 && !chainMatch) ? 0.15 : 1.0;
-
-    let dNative = 1.0;
-    if (p.category !== 'Chain') {
-      for (const ch of p.chains) {
-        const cw = normWord(ch);
-        if (cw.length >= 4 && fw.length >= 4 && cw === fw && this.liveEcoChains.has(ch)) {
-          dNative = 0.10;
-          break;
-        }
-      }
-    }
-    return [dParent, dChainSub, dNative];
-  }
-
-  cv(): StageBCvResult {
-    const rows = this.non_cex.slice().sort((a, b) => {
-      const ca = a.category ?? 'Unknown';
-      const cb = b.category ?? 'Unknown';
-      if (ca < cb) return -1;
-      if (ca > cb) return 1;
-      if (a.tvl_usd !== b.tvl_usd) return a.tvl_usd - b.tvl_usd;
-      if (a.slug < b.slug) return -1;
-      if (a.slug > b.slug) return 1;
-      return 0;
-    });
-
-    const folds: SnapshotProtocol[][] = [[], [], [], [], []];
-    for (let i = 0; i < rows.length; i++) {
-      folds[i % 5]!.push(rows[i]!);
-    }
-
-    const labels: number[] = [];
-    const s0: number[] = [];
-    const s1: number[] = [];
-    const s2: number[] = [];
-    const dsvcRow: number[] = [];
-    const foldParams: Array<{
-      m_b1: number;
-      w0: number;
-      tau: number;
-      m_cure: number;
-      d_svc: number;
-    }> = [];
-
-    for (let k = 0; k < 5; k++) {
-      const train: SnapshotProtocol[] = [];
-      for (let j = 0; j < 5; j++) {
-        if (j !== k) train.push(...folds[j]!);
-      }
-      const test = folds[k]!;
-      const m1 = this.tuneMInner(train);
-      const [p0Tr, piTr] = this.piFit(train, m1);
-      const cure = this.cureFit(train);
-      const [dsvc] = this.dServiceFit(train);
-      foldParams.push({
-        m_b1: m1,
-        w0: cure.w0,
-        tau: cure.tau,
-        m_cure: cure.m,
-        d_svc: dsvc,
-      });
-
-      for (const p of test) {
-        const c = p.category ?? 'Unknown';
-        labels.push(this.y(p));
-        s0.push(p0Tr);
-        s1.push(piTr[c] ?? p0Tr);
-        const a = ageDays(this.asOf, p.listed_at);
-        const t = a !== null ? a : cure.med_age;
-        const F = 1 - (1 - cure.w0) * Math.exp(-t / cure.tau);
-        s2.push((cure.pi_asym[c] ?? cure.p0_asym) * F);
-        dsvcRow.push(this.isService(p) ? dsvc : 1.0);
-      }
-    }
-
-    const b0 = { auc: aucScore(labels, s0), brier: brierScore(labels, s0) };
-    const b1 = { auc: aucScore(labels, s1), brier: brierScore(labels, s1) };
-    const b2 = { auc: aucScore(labels, s2), brier: brierScore(labels, s2) };
-
-    const keepF = b2.brier <= b1.brier + 0.002 && b2.auc > b1.auc;
-    const best = keepF ? s2 : s1;
-    const bestKey = keepF ? 'b2' : 'b1';
-
-    const s3 = best.map((b, i) => b * dsvcRow[i]!);
-    const b3 = {
-      auc: aucScore(labels, s3),
-      brier: brierScore(labels, s3),
-      base: bestKey,
-    };
-
-    const keepDsvc = b3.brier <= (keepF ? b2.brier : b1.brier) && b3.auc >= (keepF ? b2.auc : b1.auc);
-    const finalScores = keepDsvc ? s3 : best;
-
-    return {
-      b0,
-      b1,
-      b2,
-      b3,
-      final: {
-        auc: aucScore(labels, finalScores),
-        brier: brierScore(labels, finalScores),
-        keep_F: keepF,
-        keep_dsvc: keepDsvc,
-        bss: 1 - brierScore(labels, finalScores) / b0.brier,
-      },
-      fold_params: foldParams,
-    };
-  }
-
-  finalFit(keepF: boolean, keepDsvc: boolean): void {
-    this.keep_F = keepF;
-    this.keep_dsvc = keepDsvc;
-    this.m_b1 = this.tuneMInner(this.non_cex);
-    const [p0, pi] = this.piFit(this.non_cex, this.m_b1);
-    this.p0_full = p0;
-    this.pi_full = pi;
-    this.cure_full = this.cureFit(this.non_cex);
-    const [dsvc, stats] = this.dServiceFit(this.non_cex);
-    this.dsvc_full = dsvc;
-    this.dsvc_stats = stats;
-  }
-
-  pBase(p: SnapshotProtocol): number {
-    const c = p.category ?? 'Unknown';
-    if (this.keep_F) {
-      const pi = this.cure_full.pi_asym[c] ?? this.cure_full.p0_asym;
-      const a = ageDays(this.asOf, p.listed_at);
-      const S = a === null ? 0.70 : Math.max(0.15, Math.exp(-a / this.cure_full.tau));
-      return (pi * S) / (pi * S + (1 - pi));
-    }
-    const pi = this.pi_full[c] ?? this.p0_full;
-    const a = ageDays(this.asOf, p.listed_at);
-    return pi * (a !== null && a > 1095 ? 0.65 : 1.0);
-  }
-
-  pLaunch(p: SnapshotProtocol): number {
-    const pb = this.pBase(p);
-    const d = this.keep_dsvc && this.isService(p) ? this.dsvc_full : 1.0;
-    const [d1, d2, d3] = this.gates(p);
-    return clip(pb * d * d1 * d2 * d3, 0.0, 0.95);
-  }
-}
-
-// ---------------- Board & Radar Machinery ----------------
-
-export interface BoardRow {
-  rank: number;
-  slug: string;
-  name: string;
-  category: string | null;
-  chains: string[];
-  tvl_usd: number;
-  change_7d: number | null;
-  mcap_usd: number | null;
-  listed_at: string | null;
-  gecko_id: string | null;
-  symbol: string | null;
-  token_status: 'pre-token';
-  age_days: number | null;
-  implied_value_usd: number;
-  is_watchlist: boolean;
-  verdict: 'farm' | 'watch' | 'skip';
-  model: {
-    v50: number;
-    v10: number;
-    v90: number;
-    p_launch: number;
-    y_hat: number;
-    alpha_group: number;
-    med_r: number;
-    age_days: number | null;
-  };
-  farm_steps: string[];
-}
-
-export interface RadarRow {
-  rank: number;
-  slug: string;
-  name: string;
-  category: string | null;
-  chains: string[];
-  tvl_usd: number;
-  change_7d: number | null;
-  age_days: number | null;
-  implied_value_usd: number;
-  v50_usd: number;
-  v10_usd: number;
-  v90_usd: number;
-  p_launch: number;
-  verdict: 'farm' | 'watch' | 'skip';
-  is_watchlist: boolean;
-}
-
-export interface LiveRow {
-  slug: string;
-  name: string;
-  category: string | null;
-  chains: string[];
-  tvl_usd: number;
-  mcap_usd: number | null;
-  change_7d: number | null;
-}
-
-export interface RadarData {
-  as_of: string;
-  source: string;
-  floor_usd: number;
-  model_version: string;
-  watchlist_size: number;
-  board_size: number;
-  early_size: number;
-  live_size: number;
-  calibration_count: number;
-  rows: RadarRow[];
-  live: LiveRow[];
-  validation: {
-    stage_a: {
-      match: {
-        n: number;
-        table: AblationRow[];
-        kept_free: string[];
-        kept_offset: boolean;
-        conformal: ConformalResult;
-      };
-      all: {
-        n: number;
-        table: AblationRow[];
-        conformal: ConformalResult;
-      };
-      final_fit: {
-        lambda: number;
-        m_shr: string | null;
-        lam_m1: number;
-        beta: number[];
-        alpha: Record<string, number>;
-        winsor_bounds: number[];
-        n_g: Record<string, number>;
-      };
-    };
-    stage_b: {
-      target: string;
-      p0: number;
-      cv: StageBCvResult;
-      keep_F: boolean;
-      keep_dsvc: boolean;
-      m_b1: number;
-      p0_full: number;
-      cure: {
-        w0: number;
-        tau: number;
-        m: number;
-        p0_asym: number;
-      };
-      d_service: number;
-      d_service_stats: number[];
-    };
-    verdicts: {
-      q70_p: number;
-      p_floor: number;
-      q75_implied: number;
-      counts: Record<string, number>;
-    };
-    oof_scatter: Array<{ slug: string; actual_ln: number; pred_ln: number }>;
-  };
-}
-
-export const round2 = (n: number | null): number | null => (n !== null ? Number(n.toFixed(2)) : null);
-
-export function liveRows(snapshot: Snapshot): LiveRow[] {
-  return snapshot.protocols
-    .filter((p) => !isPreToken(p) && p.category !== 'CEX')
-    .sort(
-      (a, b) =>
-        (b.mcap_usd ?? 0) - (a.mcap_usd ?? 0) ||
-        b.tvl_usd - a.tvl_usd ||
-        (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0),
-    )
-    .slice(0, LIVE_ROWS)
-    .map((p) => ({
-      slug: p.slug,
-      name: p.name,
-      category: p.category,
-      chains: p.chains,
-      tvl_usd: p.tvl_usd,
-      mcap_usd: p.mcap_usd,
-      change_7d: p.change_7d,
-    }));
-}
-
-export function buildRadar(snapshot: Snapshot): {
-  board: BoardRow[];
-  radar: RadarData;
-} {
-  // Stage A ablations on both cohorts
-  const aMatch = new StageA(snapshot, 'match');
-  const resMatch = aMatch.ablation();
-  const confMatch = aMatch.conformal(resMatch.oofFinal);
-
-  const aAll = new StageA(snapshot, 'all');
-  const resAll = aAll.ablation();
-  const confAll = aAll.conformal(resAll.oofFinal);
-
-  // Final Stage A fit on L_match
-  const finalFitA = aMatch.finalModel(resMatch.kept, resMatch.keptMshrs);
-
-  // Stage B CV and final fit
-  const b = new StageB(snapshot);
-  const cvB = b.cv();
-  b.finalFit(cvB.final.keep_F, cvB.final.keep_dsvc);
-
-  // Board selection: 40 watchlist + top 160 rankable
-  const bySlug = new Map<string, SnapshotProtocol>(snapshot.protocols.map((p) => [p.slug, p]));
-  const chosenMap = new Map<string, SnapshotProtocol>();
-
-  for (const slug of snapshot.watchlist) {
-    const p = bySlug.get(slug);
-    if (p !== undefined) chosenMap.set(slug, p);
-  }
-
-  const early = snapshot.protocols
-    .filter((p) => !chosenMap.has(p.slug) && isRankable(p))
-    .sort((x, y) => y.tvl_usd - x.tvl_usd || (x.slug < y.slug ? -1 : x.slug > y.slug ? 1 : 0))
-    .slice(0, EARLY_ROWS);
-  for (const p of early) chosenMap.set(p.slug, p);
-
-  // Predict each row
-  interface RowScored {
-    p: SnapshotProtocol;
-    yh: number;
-    v50: number;
-    v10: number;
-    v90: number;
-    plRaw: number;
-    pl: number;
-    implied: number;
-    alphaG: number;
-    age: number | null;
-  }
-
-  const scoredList: RowScored[] = [];
-  for (const p of chosenMap.values()) {
-    const yh = aMatch.predict(p, finalFitA.ctx, finalFitA.alpha, finalFitA.beta, resMatch.kept[0]);
-    const s = Math.sqrt(1 + 1 / (aMatch.n_g[macroGroup(p.category)]! + 3));
-    const v50 = Math.exp(yh + confMatch.med_r);
-    const v10 = Math.exp(yh + s * confMatch.q10);
-    const v90 = Math.exp(yh + s * confMatch.q90);
-    const plRaw = b.pLaunch(p);
-    const pl = roundJs(plRaw * 10000) / 10000;
-    const implied = Math.max(1, roundJs(plRaw * v50));
-    const alphaG = finalFitA.alpha[macroGroup(p.category)] ?? 0.0;
-    const age = ageDays(snapshot.as_of, p.listed_at);
-    scoredList.push({ p, yh, v50, v10, v90, plRaw, pl, implied, alphaG, age });
-  }
-
-  // Verdict thresholds
-  const nonSkipP = scoredList
-    .map((r) => r.pl)
-    .filter((v) => v >= 0.25)
-    .sort((x, y) => x - y);
-  const q70P = nonSkipP.length > 0 ? quantileSorted(nonSkipP, 0.70) : 0.45;
-  const allImplied = scoredList.map((r) => r.implied).sort((x, y) => x - y);
-  const q75Iv = quantileSorted(allImplied, 0.75);
-  const pFloor = Math.max(0.45, q70P);
-
-  // Sort board by (-implied, slug)
-  scoredList.sort((x, y) => y.implied - x.implied || (x.p.slug < y.p.slug ? -1 : x.p.slug > y.p.slug ? 1 : 0));
-
-  const watchlistSet = new Set(snapshot.watchlist);
-  const counts: Record<string, number> = { farm: 0, watch: 0, skip: 0 };
-
-  const board: BoardRow[] = scoredList.map((r, i) => {
-    let verdict: 'farm' | 'watch' | 'skip';
-    if (r.pl < 0.25) {
-      verdict = 'skip';
-    } else if (r.pl >= pFloor && r.implied >= q75Iv) {
-      verdict = 'farm';
-    } else {
-      verdict = 'watch';
-    }
-    counts[verdict]++;
-
-    return {
-      rank: i + 1,
-      slug: r.p.slug,
-      name: r.p.name,
-      category: r.p.category,
-      chains: r.p.chains,
-      tvl_usd: r.p.tvl_usd,
-      change_7d: r.p.change_7d,
-      mcap_usd: r.p.mcap_usd,
-      listed_at: r.p.listed_at,
-      gecko_id: r.p.gecko_id,
-      symbol: r.p.symbol,
-      token_status: 'pre-token',
-      age_days: r.age,
-      implied_value_usd: r.implied,
-      is_watchlist: watchlistSet.has(r.p.slug),
-      verdict,
-      model: {
-        v50: roundJs(r.v50),
-        v10: roundJs(r.v10),
-        v90: roundJs(r.v90),
-        p_launch: r.pl,
-        y_hat: roundJs(r.yh * 1e4) / 1e4,
-        alpha_group: roundJs(r.alphaG * 1e4) / 1e4,
-        med_r: roundJs(confMatch.med_r * 1e4) / 1e4,
-        age_days: r.age,
-      },
-      farm_steps: [],
-    };
-  });
-
-  const live = liveRows(snapshot);
-  const earlyCount = board.filter((r) => !watchlistSet.has(r.slug)).length;
-
-  const oofScatter = resMatch.oofFinal.map(([y, yh, slug]) => ({
-    slug,
-    actual_ln: roundJs(y * 1000) / 1000,
-    pred_ln: roundJs(yh * 1000) / 1000,
-  }));
-
-  const mShrStr =
-    finalFitA.m_shr === null
-      ? null
-      : finalFitA.m_shr === Infinity
-      ? 'inf'
-      : String(finalFitA.m_shr);
-
-  const radar: RadarData = {
-    as_of: snapshot.as_of,
-    source: snapshot.source,
-    floor_usd: snapshot.floor_usd,
-    model_version: MODEL_VERSION,
-    watchlist_size: snapshot.watchlist.length,
-    board_size: board.length,
-    early_size: earlyCount,
-    live_size: live.length,
-    calibration_count: aMatch.L.length,
-    rows: board.map((b) => ({
-      rank: b.rank,
-      slug: b.slug,
-      name: b.name,
-      category: b.category,
-      chains: b.chains,
-      tvl_usd: b.tvl_usd,
-      change_7d: round2(b.change_7d),
-      age_days: b.age_days,
-      implied_value_usd: b.implied_value_usd,
-      v50_usd: b.model.v50,
-      v10_usd: b.model.v10,
-      v90_usd: b.model.v90,
-      p_launch: b.model.p_launch,
-      verdict: b.verdict,
-      is_watchlist: b.is_watchlist,
-    })),
-    live,
-    validation: {
-      stage_a: {
-        match: {
-          n: aMatch.L.length,
-          table: resMatch.table,
-          kept_free: resMatch.kept[0],
-          kept_offset: resMatch.kept[1],
-          conformal: confMatch,
-        },
-        all: {
-          n: aAll.L.length,
-          table: resAll.table,
-          conformal: confAll,
-        },
-        final_fit: {
-          lambda: finalFitA.lam,
-          m_shr: mShrStr,
-          lam_m1: finalFitA.lam_m1,
-          beta: finalFitA.beta,
-          alpha: finalFitA.alpha,
-          winsor_bounds: finalFitA.ctx.bounds,
-          n_g: aMatch.n_g,
-        },
-      },
-      stage_b: {
-        target: b.targetName(),
-        p0: b.p0,
-        cv: cvB,
-        keep_F: cvB.final.keep_F,
-        keep_dsvc: cvB.final.keep_dsvc,
-        m_b1: b.m_b1,
-        p0_full: b.p0_full,
-        cure: {
-          w0: b.cure_full.w0,
-          tau: b.cure_full.tau,
-          m: b.cure_full.m,
-          p0_asym: b.cure_full.p0_asym,
-        },
-        d_service: b.dsvc_full,
-        d_service_stats: b.dsvc_stats,
-      },
-      verdicts: {
-        q70_p: q70P,
-        p_floor: pFloor,
-        q75_implied: q75Iv,
-        counts,
-      },
-      oof_scatter: oofScatter,
-    },
-  };
-
-  return { board, radar };
+function cmpStr(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 export function parseSnapshot(text: string): Snapshot {
@@ -1524,9 +315,6 @@ export function parseSnapshot(text: string): Snapshot {
   if (typeof o.source !== 'string') {
     throw new SnapshotError('snapshot.json has no source');
   }
-  if (typeof o.floor_usd !== 'number' || !Number.isSafeInteger(o.floor_usd) || o.floor_usd <= 0) {
-    throw new SnapshotError('snapshot.json has no floor_usd');
-  }
   if (!Array.isArray(o.protocols)) {
     throw new SnapshotError('snapshot.json has no protocols array');
   }
@@ -1544,28 +332,309 @@ export function parseSnapshot(text: string): Snapshot {
       typeof p.tvl_usd !== 'number' ||
       !Number.isFinite(p.tvl_usd)
     ) {
-      throw new SnapshotError(`snapshot.json's protocol ${i} lacks a slug, a name or a TVL`);
+      throw new SnapshotError(`snapshot.json's protocol ${i} is missing required fields`);
     }
     return {
       slug: p.slug,
       name: p.name,
       category: typeof p.category === 'string' ? p.category : null,
-      chains: Array.isArray(p.chains) ? p.chains.filter((c): c is string => typeof c === 'string') : [],
+      chains: Array.isArray(p.chains)
+        ? p.chains.filter((c): c is string => typeof c === 'string')
+        : [],
       tvl_usd: p.tvl_usd,
-      change_7d: typeof p.change_7d === 'number' && Number.isFinite(p.change_7d) ? p.change_7d : null,
-      mcap_usd: typeof p.mcap_usd === 'number' && Number.isFinite(p.mcap_usd) ? p.mcap_usd : null,
+      change_7d:
+        typeof p.change_7d === 'number' && Number.isFinite(p.change_7d)
+          ? p.change_7d
+          : null,
+      mcap_usd:
+        typeof p.mcap_usd === 'number' && Number.isFinite(p.mcap_usd)
+          ? p.mcap_usd
+          : null,
       listed_at: typeof p.listed_at === 'string' ? p.listed_at : null,
       gecko_id: typeof p.gecko_id === 'string' ? p.gecko_id : null,
       symbol: typeof p.symbol === 'string' ? p.symbol : null,
     };
   });
+
   return {
     as_of: o.as_of,
     source: o.source,
-    floor_usd: o.floor_usd,
     protocols,
     watchlist: o.watchlist as string[],
   };
+}
+
+export interface BoardRow {
+  rank: number;
+  slug: string;
+  name: string;
+  category: string | null;
+  chains: string[];
+  tvl_usd: number;
+  change_7d: number | null;
+  mcap_usd: number | null;
+  listed_at: string | null;
+  gecko_id: string | null;
+  symbol: string | null;
+  token_status: 'pre-token';
+  age_days: number | null;
+  implied_value_usd: number;
+  implied_p25_usd: number;
+  implied_p75_usd: number;
+  is_watchlist: boolean;
+  verdict: 'farm' | 'marginal' | 'skip';
+  model: {
+    v50: number;
+    v10: number;
+    v25: number;
+    v75: number;
+    v90: number;
+    p_launch: number;
+    pi: number;
+    F: number;
+    S: number;
+    y_hat: number;
+    med_r: number;
+    age_days: number | null;
+    gate_code: string;
+    rank_lo: number;
+    rank_hi: number;
+  };
+  roi: {
+    deposit: number;
+    drop: number;
+    fees: number;
+    net: number;
+    net_hr: number;
+    tbill: number;
+    hands_on_hours: number;
+    tx_count: number;
+    be_drop_share: number;
+    be_token_odds: number;
+    exit_tvl: number;
+    exec_chain: string;
+    gas: number;
+    bridge: number;
+  };
+  farm_steps: string[];
+  nearest_comps: {
+    slug: string;
+    name: string;
+    category: string | null;
+    tvl_usd: number;
+    mcap_usd: number;
+    ratio: number;
+    distance: number;
+  }[];
+}
+
+export interface RadarRow {
+  rank: number;
+  slug: string;
+  name: string;
+  category: string | null;
+  chains: string[];
+  tvl_usd: number;
+  change_7d: number | null;
+  age_days: number | null;
+  implied_value_usd: number;
+  implied_p25_usd: number;
+  implied_p75_usd: number;
+  v50_usd: number;
+  v10_usd: number;
+  v25_usd: number;
+  v75_usd: number;
+  v90_usd: number;
+  p_launch: number;
+  pi: number;
+  F: number;
+  S: number;
+  verdict: 'farm' | 'marginal' | 'skip';
+  is_watchlist: boolean;
+  gate_code: string;
+  rank_lo: number;
+  rank_hi: number;
+  deposit: number;
+  drop: number;
+  fees: number;
+  net: number;
+  net_hr: number;
+  tbill: number;
+  hands_on_hours: number;
+  tx_count: number;
+  be_drop_share: number;
+  be_token_odds: number;
+  exit_tvl: number;
+  exec_chain: string;
+}
+
+export interface LiveRow {
+  slug: string;
+  name: string;
+  category: string | null;
+  chains: string[];
+  tvl_usd: number;
+  mcap_usd: number | null;
+  change_7d: number | null;
+}
+
+export interface RadarData {
+  as_of: string;
+  source: string;
+  model_version: 'radar-5.2';
+  watchlist_size: number;
+  board_size: number;
+  early_size: number;
+  live_size: number;
+  calibration_count: number;
+  rows: RadarRow[];
+  live: LiveRow[];
+  validation: {
+    stage_a: {
+      match: {
+        n: number;
+        table: {
+          term: string;
+          loo_typical_miss: number;
+          wf_typical_miss: number;
+          t_stat: number | null;
+          status: string;
+        }[];
+        kept_feats: string[];
+        kept_offset_group: string | null;
+        kept_offset_lambdas: number[] | null;
+        final_loo: number;
+        final_wf: number;
+        conformal_loo: {
+          q10: number;
+          q25: number;
+          med_r: number;
+          q75: number;
+          q90: number;
+          coverage: {
+            within_x3: number;
+            coverage_p25_p75: number;
+            coverage_p10_p90: number;
+          };
+        };
+        conformal_wf: {
+          q10: number;
+          q25: number;
+          med_r: number;
+          q75: number;
+          q90: number;
+          coverage: {
+            within_x3: number;
+            coverage_p25_p75: number;
+            coverage_p10_p90: number;
+          };
+        };
+      };
+      all: {
+        n: number;
+        table: {
+          term: string;
+          loo_typical_miss: number;
+          wf_typical_miss: number;
+          t_stat: number | null;
+          status: string;
+        }[];
+      };
+      final_fit: {
+        beta: number[];
+        beta_se: Record<string, number>;
+        med_r: number;
+        q10: number;
+        q25: number;
+        q75: number;
+        q90: number;
+      };
+    };
+    stage_b: {
+      cohort: string;
+      n_protocols: number;
+      ablation: {
+        term: string;
+        brier_10fold: number;
+        acc_10fold: number;
+        brier_wf: number;
+        acc_wf: number;
+        status: string;
+        cv10_mode_lambda: number;
+        cv10_mode_m_shr: number;
+        cv10_mode_w0: number;
+        wf_lambda: number;
+        wf_m_shr: number;
+        wf_w0: number;
+      }[];
+      kept_terms: string[];
+      baseline_wf_brier: number;
+      final_kept_wf_brier: number;
+      wf_brier_margin: number;
+      edge_allowance: {
+        used: boolean;
+        valid: boolean;
+        records: any[];
+      };
+      final_fit: {
+        gamma: number[];
+        gamma_se: Record<string, number>;
+        d_service: number;
+        d_service_stats: {
+          k_svc: number;
+          n_svc: number;
+          p0: number;
+        };
+        lambda: number;
+        m_shr: number;
+        w0: number;
+        p0_asym: number;
+        pi_hat_c: Record<string, number>;
+      };
+      bootstrap: {
+        n_refits: number;
+        seed: number;
+        se: Record<string, number>;
+        category_offsets_spread: Record<string, { min: number; max: number; mean: number }>;
+      };
+    };
+    gates: Record<string, [boolean, string]>;
+    ledger: {
+      groups: [string, number][];
+      total: number;
+    };
+    verdicts: {
+      counts: Record<string, number>;
+      farm_count_at_1_25h: number;
+    };
+    audit: {
+      rc_skip: number;
+      rc_in_top50: number;
+      violations: any[];
+      audited_slugs: string[];
+    };
+  };
+}
+
+export function liveRows(snapshot: Snapshot): LiveRow[] {
+  return snapshot.protocols
+    .filter((p) => !isPreToken(p) && p.category !== 'CEX')
+    .sort(
+      (a, b) =>
+        (b.mcap_usd ?? 0) - (a.mcap_usd ?? 0) ||
+        b.tvl_usd - a.tvl_usd ||
+        cmpStr(a.slug, b.slug),
+    )
+    .slice(0, LIVE_ROWS)
+    .map((p) => ({
+      slug: p.slug,
+      name: p.name,
+      category: p.category,
+      chains: p.chains,
+      tvl_usd: p.tvl_usd,
+      mcap_usd: p.mcap_usd,
+      change_7d: p.change_7d,
+    }));
 }
 
 export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null {
@@ -1588,9 +657,13 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
   }
   for (const r of board) {
     const steps = r.farm_steps;
-    if (steps.length < 3 || steps.length > 12) return `${r.slug} has ${steps.length} farm steps`;
+    if (!steps || steps.length < 3 || steps.length > 12) {
+      return `${r.slug} has ${steps?.length ?? 0} farm steps`;
+    }
     for (const s of steps) {
-      if (s.length < 20 || s.length > 600) return `${r.slug} has a farm step of ${s.length} characters`;
+      if (s.length < 20 || s.length > 600) {
+        return `${r.slug} has a farm step of ${s.length} characters`;
+      }
     }
     if (!Number.isSafeInteger(r.implied_value_usd) || r.implied_value_usd <= 0) {
       return `${r.slug} has implied value ${r.implied_value_usd}`;
@@ -1599,3 +672,1613 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
   return null;
 }
 
+export function buildRadar(snapshot: Snapshot): {
+  board: BoardRow[];
+  radar: RadarData;
+} {
+  const asOf = snapshot.as_of;
+  const protocols = snapshot.protocols;
+  const watchlist = snapshot.watchlist || [];
+
+  // Live brands and chains for structural gates
+  const liveBrands = new Set<string>();
+  for (const p of protocols) {
+    if (!isPreToken(p)) {
+      const fw = normWord(p.name);
+      if (fw.length >= 4) liveBrands.add(fw);
+      if (p.symbol) {
+        const sw = normWord(p.symbol);
+        if (sw.length >= 4) liveBrands.add(sw);
+      }
+    }
+  }
+
+  const liveEcoChains = new Set<string>();
+  for (const p of protocols) {
+    if (!isPreToken(p)) {
+      for (const ch of p.chains || []) {
+        liveEcoChains.add(ch);
+      }
+    }
+  }
+
+  function computeGates(p: { category: string | null; name: string; chains?: string[]; tvl_usd?: number }): [number, number, number] {
+    const fw = normWord(p.name);
+    const isPegged = (
+      p.category === 'CDP' &&
+      /^usd[a-z0-9]{1,2}$/i.test((p.name || '').trim()) &&
+      (p.tvl_usd || 0) > 500_000_000
+    );
+    const dParent = ((fw.length >= 4 && liveBrands.has(fw)) || isPegged) ? 0.05 : 1.0;
+
+    let chainMatch = false;
+    for (const ch of p.chains || []) {
+      const cw = normWord(ch);
+      if (cw.length >= 4 && fw.length >= 4 && (cw === fw || fw.startsWith(cw) || cw.startsWith(fw))) {
+        chainMatch = true;
+      }
+    }
+    const dChainSub = (p.category === 'Chain' && (p.chains || []).length > 0 && !chainMatch) ? 0.15 : 1.0;
+
+    let dNative = 1.0;
+    if (p.category !== 'Chain') {
+      for (const ch of p.chains || []) {
+        const cw = normWord(ch);
+        if (cw.length >= 4 && fw.length >= 4 && cw === fw && liveEcoChains.has(ch)) {
+          dNative = 0.10;
+          break;
+        }
+      }
+    }
+    return [dParent, dChainSub, dNative];
+  }
+
+  function gateCodeOf(d1: number, d2: number, d3: number): string {
+    const codes: string[] = [];
+    if (d1 < 1.0) codes.push('Parent ×0.05');
+    if (d2 < 1.0) codes.push('Chain-Sub ×0.15');
+    if (d3 < 1.0) codes.push('Native ×0.10');
+    return codes.length > 0 ? codes.join('; ') : 'none';
+  }
+
+  // =====================================================================
+  // STAGE A: Conditional Liquid Valuation
+  // =====================================================================
+  const L_match = protocols.filter((p) =>
+    (p.mcap_usd || 0) > 0 &&
+    (p.tvl_usd || 0) >= 1e6 &&
+    p.category !== 'CEX' &&
+    !NON_LAUNCH.has(p.category || '') &&
+    !VERSIONED.test(p.name || '') &&
+    p.listed_at !== null
+  );
+  L_match.sort((a, b) => cmpStr(a.slug, b.slug));
+  const N_match = L_match.length;
+
+  function runStageAAblation(cohort: any[], isControlAlarm = true) {
+    const cohort_sorted = cohort.slice().sort((a, b) => cmpStr(a.slug, b.slug));
+    const N = cohort_sorted.length;
+    for (let i = 0; i < N; i++) {
+      const p = cohort_sorted[i]!;
+      p.z = Math.log(p.mcap_usd / p.tvl_usd);
+      p.x_tvl = Math.log(p.tvl_usd / 1e8);
+      p.macro = macroGroup(p.category);
+      p.age_days = ageDays(asOf, p.listed_at)!;
+      p.x_age = Math.log(1.0 + p.age_days);
+      p.x_chains = Math.log(Math.max(1, (p.chains || []).length));
+      p._ctrl_peer = cohort_sorted[(i + 1) % N]!;
+    }
+
+    const wf_cohort = cohort_sorted.slice().sort((a, b) => {
+      const c = cmpStr(a.listed_at, b.listed_at);
+      return c !== 0 ? c : cmpStr(a.slug, b.slug);
+    });
+    const start_wf = Math.max(Math.floor(0.40 * wf_cohort.length), 35);
+
+    function evalModel(modelFn: (tr: any[], te: any, tr_meds: Map<string, number>) => number): [number, number] {
+      const loo_misses: number[] = [];
+      for (let i = 0; i < N; i++) {
+        const tr = cohort_sorted.filter((_, j) => j !== i);
+        const te = cohort_sorted[i]!;
+        const tr_meds = computeChainMedians(tr);
+        const zh = modelFn(tr, te, tr_meds);
+        loo_misses.push(Math.exp(Math.abs(zh - te.z)));
+      }
+      const loo_typ = median(loo_misses);
+
+      const wf_misses: number[] = [];
+      for (let i = start_wf; i < wf_cohort.length; i++) {
+        const te = wf_cohort[i]!;
+        const tr = wf_cohort.filter((p) => p.listed_at < te.listed_at);
+        if (tr.length < 35) continue;
+        const tr_meds = computeChainMedians(tr);
+        const zh = modelFn(tr, te, tr_meds);
+        wf_misses.push(Math.exp(Math.abs(zh - te.z)));
+      }
+      const wf_typ = median(wf_misses);
+      return [loo_typ, wf_typ];
+    }
+
+    function computeSlopeStability(test_feats: string[], candidate_feat: string): [number, number, number] {
+      const full_meds = computeChainMedians(cohort_sorted);
+      function row_f(p: any, meds: Map<string, number>): number[] {
+        const vals = [1.0];
+        for (const f of test_feats) {
+          if (f === 'x3') vals.push(calcX3(p, meds));
+          else if (f === 'x_ctrl') vals.push(calcX3(p._ctrl_peer, meds));
+          else vals.push(p[f]);
+        }
+        return vals;
+      }
+      const X_full = cohort_sorted.map((p) => row_f(p, full_meds));
+      const y_full = cohort_sorted.map((p) => p.z);
+      const b_full = huberIrls(X_full, y_full);
+      const cand_idx = test_feats.indexOf(candidate_feat) + 1;
+      const b_cand = b_full[cand_idx]!;
+
+      const rng = new Mulberry32(20261114);
+      const boot_vals: number[] = [];
+      for (let b = 0; b < 200; b++) {
+        const sample = Array.from({ length: N }, () => cohort_sorted[Math.floor(rng.next() * N)]!);
+        const s_meds = computeChainMedians(sample);
+        const Xs = sample.map((p) => row_f(p, s_meds));
+        const ys = sample.map((p) => p.z);
+        const bs = huberIrls(Xs, ys);
+        boot_vals.push(bs[cand_idx]!);
+      }
+
+      const mean_v = boot_vals.reduce((a, b) => a + b, 0.0) / boot_vals.length;
+      const se_boot = Math.sqrt(boot_vals.reduce((a, b) => a + (b - mean_v) ** 2, 0.0) / (boot_vals.length - 1));
+      const t_stat = se_boot > 1e-9 ? Math.abs(b_cand) / se_boot : Infinity;
+      return [t_stat, b_cand, se_boot];
+    }
+
+    function makeLinearFn(
+      feat_list: string[],
+      offset_group: string | null = null,
+      offset_lambdas: number[] | null = null,
+    ) {
+      return function (tr: any[], te: any, tr_meds: Map<string, number>): number {
+        function row_feats(p: any): number[] {
+          const vals = [1.0];
+          for (const f of feat_list) {
+            if (f === 'x3') vals.push(calcX3(p, tr_meds));
+            else if (f === 'x_ctrl') vals.push(calcX3(p._ctrl_peer, tr_meds));
+            else vals.push(p[f]);
+          }
+          return vals;
+        }
+        const X_tr = tr.map((p) => row_feats(p));
+        const y_tr = tr.map((p) => p.z);
+        const b = huberIrls(X_tr, y_tr);
+        let zh = dot(b, row_feats(te));
+
+        if (offset_group && offset_lambdas) {
+          const resids = tr.map((p) => p.z - dot(b, row_feats(p)));
+          const g_sums = new Map<string, number>();
+          const g_counts = new Map<string, number>();
+          for (let i = 0; i < tr.length; i++) {
+            const g = tr[i][offset_group];
+            const r = resids[i]!;
+            g_sums.set(g, (g_sums.get(g) || 0) + r);
+            g_counts.set(g, (g_counts.get(g) || 0) + 1);
+          }
+          let best_lam = offset_lambdas[0]!;
+          let best_miss = Infinity;
+          for (const lam of offset_lambdas) {
+            const inner: number[] = [];
+            for (let i = 0; i < tr.length; i++) {
+              const p = tr[i]!;
+              const r = resids[i]!;
+              const g = p[offset_group];
+              const s = (g_sums.get(g) || 0) - r;
+              const c = (g_counts.get(g) || 0) - 1;
+              const off = c > 0 ? s / (c + lam) : 0.0;
+              const zh_in = dot(b, row_feats(p)) + off;
+              inner.push(Math.exp(Math.abs(zh_in - p.z)));
+            }
+            const m = median(inner);
+            if (m < best_miss) {
+              best_miss = m;
+              best_lam = lam;
+            }
+          }
+          const g_te = te[offset_group];
+          const count_te = g_counts.get(g_te) || 0;
+          const off_te = count_te > 0 ? (g_sums.get(g_te) || 0) / (count_te + best_lam) : 0.0;
+          zh += off_te;
+        }
+        return zh;
+      };
+    }
+
+    // 1. Baseline
+    const [loo_0, wf_0] = evalModel((tr) => median(tr.map((p) => p.z)));
+    const rows: [string, number, number, number | null, string][] = [
+      ['1. Flat median multiple (baseline)', loo_0, wf_0, null, 'baseline'],
+    ];
+    let kept_loo = loo_0;
+    let kept_wf = wf_0;
+    let kept_feats: string[] = [];
+    let kept_offset_group: string | null = null;
+    let kept_offset_lambdas: number[] | null = null;
+
+    // 2. + size curve
+    const [loo_size, wf_size] = evalModel(makeLinearFn(['x_tvl']));
+    const [t_size, , ] = computeSlopeStability(['x_tvl'], 'x_tvl');
+    const d_loo = kept_loo - loo_size;
+    const d_wf = kept_wf - wf_size;
+    const dual_keep = d_loo > 0 && d_wf > 0 && (d_loo >= 0.01 || d_wf >= 0.01);
+    const passes = dual_keep && t_size >= 1.5;
+    let status_size = 'tested, not kept';
+    if (passes) {
+      status_size = 'kept';
+      kept_feats = ['x_tvl'];
+      kept_loo = loo_size;
+      kept_wf = wf_size;
+    }
+    rows.push(['2. + size curve, ln(TVL / $100M)', loo_size, wf_size, t_size, status_size]);
+
+    // 3. + family effect & 4. + category effect
+    const [loo_fam, wf_fam] = evalModel(makeLinearFn(kept_feats, 'macro', [8, 16, 32]));
+    const [loo_cat, wf_cat] = evalModel(makeLinearFn(kept_feats, 'category', [16, 32, 64, 128]));
+
+    const d_loo_fam = kept_loo - loo_fam;
+    const d_wf_fam = kept_wf - wf_fam;
+    const fam_passes = d_loo_fam > 0 && d_wf_fam > 0 && (d_loo_fam >= 0.01 || d_wf_fam >= 0.01);
+
+    const d_loo_cat = kept_loo - loo_cat;
+    const d_wf_cat = kept_wf - wf_cat;
+    const cat_passes = d_loo_cat > 0 && d_wf_cat > 0 && (d_loo_cat >= 0.01 || d_wf_cat >= 0.01);
+
+    const cat_beats_fam = loo_cat < loo_fam && wf_cat < wf_fam;
+
+    let status_fam = 'tested, not kept';
+    let status_cat = 'tested, not kept';
+
+    if (fam_passes && cat_passes) {
+      if (cat_beats_fam) {
+        status_cat = 'kept';
+        status_fam = 'tested, not kept';
+        kept_offset_group = 'category';
+        kept_offset_lambdas = [16, 32, 64, 128];
+        kept_loo = loo_cat;
+        kept_wf = wf_cat;
+      } else {
+        status_fam = 'kept';
+        status_cat = 'tested, not kept';
+        kept_offset_group = 'macro';
+        kept_offset_lambdas = [8, 16, 32];
+        kept_loo = loo_fam;
+        kept_wf = wf_fam;
+      }
+    } else if (fam_passes && !cat_passes) {
+      status_fam = 'kept';
+      status_cat = 'tested, not kept';
+      kept_offset_group = 'macro';
+      kept_offset_lambdas = [8, 16, 32];
+      kept_loo = loo_fam;
+      kept_wf = wf_fam;
+    } else if (cat_passes && !fam_passes) {
+      status_cat = 'kept';
+      status_fam = 'tested, not kept';
+      kept_offset_group = 'category';
+      kept_offset_lambdas = [16, 32, 64, 128];
+      kept_loo = loo_cat;
+      kept_wf = wf_cat;
+    }
+    rows.push(['3. + family effect (macro-group ridge)', loo_fam, wf_fam, null, status_fam]);
+    rows.push(['4. + category effect (DefiLlama ridge)', loo_cat, wf_cat, null, status_cat]);
+
+    const cands: [string, string][] = [
+      ['5. + 7-day TVL growth (chain-demeaned)', 'x3'],
+      ['6. + age, ln(1 + age_days)', 'x_age'],
+      ['7. + chain count, ln(n_chains)', 'x_chains'],
+      ['8. + control: growth of adjacent row', 'x_ctrl'],
+    ];
+
+    for (const [term_name, feat] of cands) {
+      const test_feats = [...kept_feats, feat];
+      const fn = makeLinearFn(test_feats, kept_offset_group, kept_offset_lambdas);
+      const [lm, wm] = evalModel(fn);
+      const [t_stat, , ] = computeSlopeStability(test_feats, feat);
+      const d_l = kept_loo - lm;
+      const d_w = kept_wf - wm;
+      const dual_k = d_l > 0 && d_w > 0 && (d_l >= 0.01 || d_w >= 0.01);
+      const term_passes = dual_k && t_stat >= 1.5;
+
+      let status = '';
+      if (feat === 'x_ctrl') {
+        if (dual_k) {
+          if (isControlAlarm) {
+            throw new Error('LEAKAGE WARNING: negative control helped');
+          } else {
+            status = 'kept (LEAKAGE)';
+          }
+        } else {
+          status = 'must not help (rejected)';
+        }
+      } else {
+        if (term_passes) {
+          status = 'kept';
+          kept_feats.push(feat);
+          kept_loo = lm;
+          kept_wf = wm;
+        } else {
+          status = 'tested, not kept';
+        }
+      }
+      rows.push([term_name, lm, wm, t_stat, status]);
+    }
+
+    return {
+      rows,
+      kept_feats,
+      kept_offset_group,
+      kept_offset_lambdas,
+      final_loo: kept_loo,
+      final_wf: kept_wf,
+    };
+  }
+
+  const res_a = runStageAAblation(L_match, true);
+  const kept_a_feats = res_a.kept_feats;
+  const meds_match = computeChainMedians(L_match);
+  const X_a_full = L_match.map((p) => [1.0, ...kept_a_feats.map((f) => f === 'x3' ? calcX3(p, meds_match) : p[f])]);
+  const y_a_full = L_match.map((p) => p.z);
+  const beta_a_full = huberIrls(X_a_full, y_a_full);
+
+  // Conformal LOO
+  const loo_resids: number[] = [];
+  for (let i = 0; i < L_match.length; i++) {
+    const tr = L_match.filter((_, j) => j !== i);
+    const te = L_match[i]!;
+    const tr_meds = computeChainMedians(tr);
+    function row_feats(p: any, meds: Map<string, number>): number[] {
+      return [1.0, ...kept_a_feats.map((f) => f === 'x3' ? calcX3(p, meds) : p[f])];
+    }
+    const X_tr = tr.map((p) => row_feats(p, tr_meds));
+    const y_tr = tr.map((p) => p.z);
+    const b = huberIrls(X_tr, y_tr);
+    const zh = dot(b, row_feats(te, tr_meds));
+    loo_resids.push(te.z - zh);
+  }
+
+  const s_loo_resids = loo_resids.slice().sort((a, b) => a - b);
+  const q10_loo = quantileSorted(s_loo_resids, 0.10);
+  const q25_loo = quantileSorted(s_loo_resids, 0.25);
+  const med_r_loo = median(s_loo_resids);
+  const q75_loo = quantileSorted(s_loo_resids, 0.75);
+  const q90_loo = quantileSorted(s_loo_resids, 0.90);
+
+  const cov_x3_loo = loo_resids.filter((r) => Math.exp(Math.abs(r)) <= 3.0).length / loo_resids.length;
+  const cov_50_loo = loo_resids.filter((r) => q25_loo <= r && r <= q75_loo).length / loo_resids.length;
+  const cov_80_loo = loo_resids.filter((r) => q10_loo <= r && r <= q90_loo).length / loo_resids.length;
+
+  // Conformal WF
+  const wf_cohort_a = L_match.slice().sort((a, b) => {
+    const c = cmpStr(a.listed_at, b.listed_at);
+    return c !== 0 ? c : cmpStr(a.slug, b.slug);
+  });
+  const start_wf_a = Math.max(Math.floor(0.40 * wf_cohort_a.length), 35);
+  const wf_resids: number[] = [];
+  for (let i = start_wf_a; i < wf_cohort_a.length; i++) {
+    const te = wf_cohort_a[i]!;
+    const tr = wf_cohort_a.filter((p) => p.listed_at < te.listed_at);
+    if (tr.length < 35) continue;
+    const tr_meds = computeChainMedians(tr);
+    function row_feats(p: any, meds: Map<string, number>): number[] {
+      return [1.0, ...kept_a_feats.map((f) => f === 'x3' ? calcX3(p, meds) : p[f])];
+    }
+    const X_tr = tr.map((p) => row_feats(p, tr_meds));
+    const y_tr = tr.map((p) => p.z);
+    const b = huberIrls(X_tr, y_tr);
+    const zh = dot(b, row_feats(te, tr_meds));
+    wf_resids.push(te.z - zh);
+  }
+
+  const s_wf_resids = wf_resids.slice().sort((a, b) => a - b);
+  const q10_wf = quantileSorted(s_wf_resids, 0.10);
+  const q25_wf = quantileSorted(s_wf_resids, 0.25);
+  const med_r_wf = median(s_wf_resids);
+  const q75_wf = quantileSorted(s_wf_resids, 0.75);
+  const q90_wf = quantileSorted(s_wf_resids, 0.90);
+
+  const cov_x3_wf = wf_resids.filter((r) => Math.exp(Math.abs(r)) <= 3.0).length / wf_resids.length;
+  const cov_50_wf = wf_resids.filter((r) => q25_wf <= r && r <= q75_wf).length / wf_resids.length;
+  const cov_80_wf = wf_resids.filter((r) => q10_wf <= r && r <= q90_wf).length / wf_resids.length;
+
+  // L_all Audit
+  const L_all = protocols.filter((p) =>
+    (p.mcap_usd || 0) > 0 &&
+    (p.tvl_usd || 0) >= 1e6 &&
+    p.category !== 'CEX' &&
+    p.listed_at !== null
+  );
+  const N_all = L_all.length;
+  const res_a_all = runStageAAblation(L_all, false);
+
+  // =====================================================================
+  // STAGE B: Token Odds (Direct Marginal Zero-Inflated Cure)
+  // =====================================================================
+  const NON_CEX = protocols.filter((p) => p.category !== 'CEX' && p.listed_at !== null);
+  NON_CEX.sort((a, b) => cmpStr(a.slug, b.slug));
+  const N_b = NON_CEX.length;
+
+  for (let i = 0; i < N_b; i++) {
+    const p = NON_CEX[i]!;
+    p.y = isPreToken(p) ? 0 : 1;
+    p.age_yr = ageDays(asOf, p.listed_at)! / 365.25;
+    p.tvl_lat = Math.log(Math.max(1.0, p.tvl_usd || 1.0) / 1e8);
+    p.is_svc = isService(p);
+    p.chains_lat = Math.log(Math.max(1, (p.chains || []).length));
+    p._ctrl_peer = NON_CEX[(i + 1) % N_b]!;
+  }
+  const median_age_yr_non_cex = median(NON_CEX.map((p) => p.age_yr));
+
+  const cv_rows = NON_CEX.slice().sort((a, b) => {
+    if (a.y !== b.y) return a.y - b.y;
+    const cCat = cmpStr(a.category || '', b.category || '');
+    if (cCat !== 0) return cCat;
+    const tvlA = a.tvl_usd || 0;
+    const tvlB = b.tvl_usd || 0;
+    if (tvlA !== tvlB) return tvlA - tvlB;
+    return cmpStr(a.slug, b.slug);
+  });
+
+  const folds_10: any[][] = Array.from({ length: 10 }, () => []);
+  for (let i = 0; i < cv_rows.length; i++) {
+    folds_10[i % 10]!.push(cv_rows[i]!);
+  }
+
+  const wf_cohort_b = NON_CEX.slice().sort((a, b) => {
+    const c = cmpStr(a.listed_at, b.listed_at);
+    return c !== 0 ? c : cmpStr(a.slug, b.slug);
+  });
+  const start_wf_b = Math.max(Math.floor(0.40 * wf_cohort_b.length), 35);
+
+  function fitCure(
+    train_rows: any[],
+    lat_feats: string[],
+    use_cat: boolean,
+    use_svc: boolean,
+    lam: number,
+    m_param: number,
+    w0: number,
+    meds: Map<string, number>,
+  ) {
+    let k_svc = 0;
+    let n_svc = 0;
+    let y_sum = 0;
+    for (const p of train_rows) {
+      if (p.is_svc) {
+        n_svc++;
+        if (p.y === 1) k_svc++;
+      }
+      y_sum += p.y;
+    }
+    const p0 = y_sum / train_rows.length;
+    const d_service = use_svc ? (p0 > 0 ? clip(((k_svc + 0.5) / (n_svc + 2)) / p0, 0.05, 0.45) : 0.45) : 1.0;
+
+    function get_lat_x(p: any): number[] {
+      const res = [1.0];
+      for (const f of lat_feats) {
+        if (f === 'x3') res.push(calcX3(p, meds));
+        else if (f === 'ctrl') res.push(calcX3(p._ctrl_peer, meds));
+        else res.push(p[f]);
+      }
+      return res;
+    }
+
+    const X_tr = train_rows.map((p) => get_lat_x(p));
+    const y_tr = train_rows.map((p) => p.y);
+    const n = train_rows.length;
+    const p_dim = X_tr[0]!.length;
+
+    let gamma = weightedLogisticIrls(X_tr, y_tr, new Array(n).fill(1.0), lam, 10);
+
+    const by_cat = new Map<string, number[]>();
+    for (let idx = 0; idx < train_rows.length; idx++) {
+      const c = train_rows[idx]!.category || 'Unknown';
+      let list = by_cat.get(c);
+      if (!list) {
+        list = [];
+        by_cat.set(c, list);
+      }
+      list.push(idx);
+    }
+
+    let p0_asym = 0.5;
+    let pi_hat_c: Record<string, number> = {};
+
+    for (let pass = 0; pass < 4; pass++) {
+      const eta = X_tr.map((x) => dot(x, gamma));
+      const s = eta.map(sigmoid);
+      const F = s.map((sj) => w0 + (1.0 - w0) * sj);
+      const sum_F = F.reduce((a, b) => a + b, 0.0);
+      p0_asym = sum_F > 0 ? clip(y_sum / sum_F, 0.05, 0.95) : 0.5;
+
+      pi_hat_c = {};
+      if (use_cat) {
+        for (const [c, idx_list] of by_cat.entries()) {
+          let k_c = 0;
+          let sum_F_c = 0;
+          for (const j of idx_list) {
+            k_c += y_tr[j]!;
+            sum_F_c += F[j]!;
+          }
+          pi_hat_c[c] = clip((k_c + m_param * p0_asym) / (sum_F_c + m_param), 0.01, 0.95);
+        }
+      }
+
+      const pi_tr = train_rows.map((p) => {
+        const c = p.category || 'Unknown';
+        const pi_base = use_cat ? (pi_hat_c[c] ?? p0_asym) : p0_asym;
+        const mult = (use_svc && p.is_svc) ? d_service : 1.0;
+        return clip(pi_base * mult, 0.01, 0.95);
+      });
+
+      for (let fStep = 0; fStep < 6; fStep++) {
+        const etaStep = X_tr.map((x) => dot(x, gamma));
+        const sStep = etaStep.map(sigmoid);
+        const FStep = sStep.map((sj) => w0 + (1.0 - w0) * sj);
+
+        const scores: number[] = [];
+        const weights_W: number[] = [];
+        for (let j = 0; j < n; j++) {
+          const pij = pi_tr[j]!;
+          const fj = FStep[j]!;
+          const sj = sStep[j]!;
+          const yj = y_tr[j]!;
+          const Pj = clip(pij * fj, 1e-6, 1.0 - 1e-6);
+          const dj = pij * (1.0 - w0) * sj * (1.0 - sj);
+          const denom = Pj * (1.0 - Pj);
+          const sc = ((yj - Pj) / denom) * dj;
+          const w_fish = Math.max(1e-6, (dj * dj) / denom);
+          scores.push(sc);
+          weights_W.push(w_fish);
+        }
+
+        const XtWX: number[][] = Array.from({ length: p_dim }, () => new Array(p_dim).fill(0.0));
+        const RHS = new Array(p_dim).fill(0.0);
+        for (let j = 0; j < n; j++) {
+          const xj = X_tr[j]!;
+          const sc = scores[j]!;
+          const wj = weights_W[j]!;
+          for (let a = 0; a < p_dim; a++) {
+            RHS[a]! += xj[a]! * sc;
+            for (let b = 0; b < p_dim; b++) {
+              XtWX[a]![b]! += xj[a]! * wj * xj[b]!;
+            }
+          }
+        }
+
+        XtWX[0]![0]! += 1e-6;
+        for (let a = 1; a < p_dim; a++) {
+          XtWX[a]![a]! += lam;
+          RHS[a]! -= lam * gamma[a]!;
+        }
+
+        const dgamma = solveLinear(XtWX, RHS);
+        for (let a = 0; a < p_dim; a++) {
+          gamma[a]! += clip(dgamma[a]!, -2.0, 2.0);
+        }
+      }
+    }
+
+    // Final closed-form pi_hat_c pass
+    const etaFinal = X_tr.map((x) => dot(x, gamma));
+    const sFinal = etaFinal.map(sigmoid);
+    const FFinal = sFinal.map((sj) => w0 + (1.0 - w0) * sj);
+    const sum_FFinal = FFinal.reduce((a, b) => a + b, 0.0);
+    p0_asym = sum_FFinal > 0 ? clip(y_sum / sum_FFinal, 0.05, 0.95) : 0.5;
+    pi_hat_c = {};
+    if (use_cat) {
+      for (const [c, idx_list] of by_cat.entries()) {
+        let k_c = 0;
+        let sum_F_c = 0;
+        for (const j of idx_list) {
+          k_c += y_tr[j]!;
+          sum_F_c += FFinal[j]!;
+        }
+        pi_hat_c[c] = clip((k_c + m_param * p0_asym) / (sum_F_c + m_param), 0.01, 0.95);
+      }
+    }
+
+    return {
+      gamma,
+      pi_hat_c,
+      p0_asym,
+      d_service,
+      d_service_stats: { k_svc, n_svc, p0 },
+      w0,
+      lat_feats,
+      use_cat,
+      use_svc,
+    };
+  }
+
+  function predictCure(model: any, rows: any[], meds: Map<string, number>): number[] {
+    const { lat_feats, gamma, pi_hat_c, p0_asym, d_service, w0, use_cat, use_svc } = model;
+    const preds: number[] = [];
+    for (const p of rows) {
+      const c = p.category || 'Unknown';
+      const mult = (use_svc && p.is_svc) ? d_service : 1.0;
+      const pi_base = use_cat ? (pi_hat_c[c] ?? p0_asym) : p0_asym;
+      const pi = clip(pi_base * mult, 0.01, 0.95);
+
+      const x_lat = [1.0];
+      for (const f of lat_feats) {
+        if (f === 'x3') x_lat.push(calcX3(p, meds));
+        else if (f === 'ctrl') x_lat.push(calcX3(p._ctrl_peer, meds));
+        else x_lat.push(p[f]);
+      }
+
+      const eta = dot(x_lat, gamma);
+      const F = w0 + (1.0 - w0) * sigmoid(eta);
+      preds.push(pi * F);
+    }
+    return preds;
+  }
+
+  function tuneCure(tune_cohort: any[], lat_feats: string[], use_cat: boolean, use_svc: boolean): [number, number, number] {
+    const s_rows = tune_cohort.slice().sort((a, b) => {
+      if (a.y !== b.y) return a.y - b.y;
+      const cCat = cmpStr(a.category || '', b.category || '');
+      if (cCat !== 0) return cCat;
+      const tvlA = a.tvl_usd || 0;
+      const tvlB = b.tvl_usd || 0;
+      if (tvlA !== tvlB) return tvlA - tvlB;
+      return cmpStr(a.slug, b.slug);
+    });
+    const inner_folds: any[][] = Array.from({ length: 5 }, () => []);
+    for (let idx = 0; idx < s_rows.length; idx++) {
+      inner_folds[idx % 5]!.push(s_rows[idx]!);
+    }
+
+    const w0_grid = [0.0, 0.20, 0.35];
+    const m_grid = use_cat ? [1, 2, 4] : [2];
+    const lam_grid = [1.0, 4.0, 12.0];
+
+    let best_loss = Infinity;
+    let best_lam = 1.0;
+    let best_m = 2;
+    let best_w0 = 0.0;
+
+    for (const w0_val of w0_grid) {
+      for (const m_val of m_grid) {
+        for (const lam_val of lam_grid) {
+          let total_loss = 0.0;
+          let total_n = 0;
+          for (let k = 0; k < 5; k++) {
+            const in_tr: any[] = [];
+            for (let j = 0; j < 5; j++) {
+              if (j !== k) in_tr.push(...inner_folds[j]!);
+            }
+            const in_val = inner_folds[k]!;
+            const in_meds = computeChainMedians(in_tr);
+            const model = fitCure(in_tr, lat_feats, use_cat, use_svc, lam_val, m_val, w0_val, in_meds);
+            const preds = predictCure(model, in_val, in_meds);
+            for (let i = 0; i < in_val.length; i++) {
+              const ph = clip(preds[i]!, 1e-6, 1.0 - 1e-6);
+              const y = in_val[i]!.y;
+              const loss = -(y * Math.log(ph) + (1.0 - y) * Math.log(1.0 - ph));
+              total_loss += loss;
+              total_n += 1;
+            }
+          }
+          const avg_loss = total_loss / total_n;
+          if (avg_loss < best_loss) {
+            best_loss = avg_loss;
+            best_lam = lam_val;
+            best_m = m_val;
+            best_w0 = w0_val;
+          }
+        }
+      }
+    }
+    return [best_lam, best_m, best_w0];
+  }
+
+  const stage_b_candidates: [string, string | null, boolean, boolean][] = [
+    ['1. Base rate of peers (baseline)', null, false, false],
+    ['2. + age, years listed', 'age_yr', false, false],
+    ['3. + category incidence', null, true, false],
+    ['4. + size curve in latency, ln(TVL/$100M)', 'tvl_lat', false, false],
+    ['5. + 7-day TVL growth in latency', 'x3', false, false],
+    ['6. + isService incidence (D_service)', null, false, true],
+    ['7. + chain count in latency, ln(n_chains)', 'chains_lat', false, false],
+    ['8. + control: growth of adjacent row', 'ctrl', false, false],
+  ];
+
+  const stage_b_results: any[] = [];
+  let kept_b_lat_feats: string[] = [];
+  let kept_b_use_cat = false;
+  let kept_b_use_svc = false;
+  let last_kept_b10 = 0.0;
+  let last_kept_bwf = 0.0;
+
+  for (const [name, feat_to_add, add_cat, add_svc] of stage_b_candidates) {
+    const cand_lat = kept_b_lat_feats.concat(feat_to_add ? [feat_to_add] : []);
+    const cand_cat = kept_b_use_cat || add_cat;
+    const cand_svc = kept_b_use_svc || add_svc;
+
+    if (cand_lat.length === 0 && !cand_cat && !cand_svc) {
+      const y_t10: number[] = [];
+      const y_p10: number[] = [];
+      for (let k = 0; k < 10; k++) {
+        const tr: any[] = [];
+        for (let j = 0; j < 10; j++) {
+          if (j !== k) tr.push(...folds_10[j]!);
+        }
+        const te = folds_10[k]!;
+        const p0 = tr.reduce((a, b) => a + b.y, 0) / tr.length;
+        for (const p of te) {
+          y_t10.push(p.y);
+          y_p10.push(p0);
+        }
+      }
+
+      const y_twf: number[] = [];
+      const y_pwf: number[] = [];
+      for (let i = start_wf_b; i < wf_cohort_b.length; i++) {
+        const te = wf_cohort_b[i]!;
+        const tr = wf_cohort_b.filter((p) => p.listed_at < te.listed_at);
+        if (tr.length < 35) continue;
+        const p0 = tr.reduce((a, b) => a + b.y, 0) / tr.length;
+        y_twf.push(te.y);
+        y_pwf.push(p0);
+      }
+
+      const b10 = brierScore(y_t10, y_p10);
+      const ac10 = accScore(y_t10, y_p10);
+      const bwf = brierScore(y_twf, y_pwf);
+      const acwf = accScore(y_twf, y_pwf);
+      last_kept_b10 = b10;
+      last_kept_bwf = bwf;
+      stage_b_results.push({
+        name,
+        b10,
+        ac10,
+        bwf,
+        acwf,
+        status: 'baseline',
+        lam_10: 1.0,
+        m_10: 2,
+        w0_10: 0.0,
+        lam_wf: 1.0,
+        m_wf: 2,
+        w0_wf: 0.0,
+      });
+    } else {
+      const [lam_10, m_10, w0_10] = tuneCure(NON_CEX, cand_lat, cand_cat, cand_svc);
+      const [lam_wf, m_wf, w0_wf] = tuneCure(wf_cohort_b.slice(0, start_wf_b), cand_lat, cand_cat, cand_svc);
+
+      const y_t10: number[] = [];
+      const y_p10: number[] = [];
+      for (let k = 0; k < 10; k++) {
+        const tr: any[] = [];
+        for (let j = 0; j < 10; j++) {
+          if (j !== k) tr.push(...folds_10[j]!);
+        }
+        const te = folds_10[k]!;
+        const tr_meds = computeChainMedians(tr);
+        const model = fitCure(tr, cand_lat, cand_cat, cand_svc, lam_10, m_10, w0_10, tr_meds);
+        const preds = predictCure(model, te, tr_meds);
+        for (let i = 0; i < te.length; i++) {
+          y_t10.push(te[i]!.y);
+          y_p10.push(preds[i]!);
+        }
+      }
+
+      const y_twf: number[] = [];
+      const y_pwf: number[] = [];
+      for (let i = start_wf_b; i < wf_cohort_b.length; i++) {
+        const te = wf_cohort_b[i]!;
+        const tr = wf_cohort_b.filter((p) => p.listed_at < te.listed_at);
+        if (tr.length < 35) continue;
+        const tr_meds = computeChainMedians(tr);
+        const model_wf = fitCure(tr, cand_lat, cand_cat, cand_svc, lam_wf, m_wf, w0_wf, tr_meds);
+        const preds = predictCure(model_wf, [te], tr_meds);
+        y_twf.push(te.y);
+        y_pwf.push(preds[0]!);
+      }
+
+      const b10 = brierScore(y_t10, y_p10);
+      const ac10 = accScore(y_t10, y_p10);
+      const bwf = brierScore(y_twf, y_pwf);
+      const acwf = accScore(y_twf, y_pwf);
+
+      const d10 = last_kept_b10 - b10;
+      const dwf = last_kept_bwf - bwf;
+      const passes = d10 > 0 && dwf > 0 && (d10 >= 0.001 || dwf >= 0.001);
+
+      let status = '';
+      if (name.includes('control')) {
+        if (passes) {
+          throw new Error('LEAKAGE WARNING: negative control helped');
+        }
+        status = 'must not help (rejected)';
+      } else if (passes) {
+        status = 'kept';
+        last_kept_b10 = b10;
+        last_kept_bwf = bwf;
+        kept_b_lat_feats = cand_lat;
+        kept_b_use_cat = cand_cat;
+        kept_b_use_svc = cand_svc;
+      } else {
+        status = 'tested, not kept';
+      }
+
+      stage_b_results.push({
+        name,
+        b10,
+        ac10,
+        bwf,
+        acwf,
+        status,
+        lam_10,
+        m_10,
+        w0_10,
+        lam_wf,
+        m_wf,
+        w0_wf,
+      });
+    }
+  }
+
+  const kept_b_terms: string[] = [];
+  for (const r of stage_b_results) {
+    if (r.status === 'kept') {
+      if (r.name.includes('age')) kept_b_terms.push('age_yr');
+      else if (r.name.includes('category')) kept_b_terms.push('category');
+      else if (r.name.includes('size')) kept_b_terms.push('tvl_lat');
+      else if (r.name.includes('growth')) kept_b_terms.push('x3');
+      else if (r.name.includes('isService')) kept_b_terms.push('is_svc');
+      else if (r.name.includes('chain')) kept_b_terms.push('chains_lat');
+    }
+  }
+
+  // Final Fit Stage B
+  const [lam_final, m_shr_final, w0_final] = tuneCure(NON_CEX, kept_b_lat_feats, kept_b_use_cat, kept_b_use_svc);
+  const meds_non_cex = computeChainMedians(NON_CEX);
+  const model_b_full = fitCure(NON_CEX, kept_b_lat_feats, kept_b_use_cat, kept_b_use_svc, lam_final, m_shr_final, w0_final, meds_non_cex);
+
+  // =====================================================================
+  // Board selection & Stage C economics
+  // =====================================================================
+  const by_slug = new Map<string, SnapshotProtocol>(protocols.map((p) => [p.slug, p]));
+  const board_watchlist = watchlist.map((s) => by_slug.get(s)).filter((p): p is SnapshotProtocol => Boolean(p));
+  const early_cands = protocols
+    .filter((p) => !watchlist.includes(p.slug) && isRankable(p))
+    .sort((a, b) => (b.tvl_usd || 0) - (a.tvl_usd || 0) || cmpStr(a.slug, b.slug));
+  const board_early = early_cands.slice(0, 160);
+  const board_cohort = board_watchlist.concat(board_early);
+
+  const board_odds = new Map<string, [number, number, number, number, number, number, number]>();
+  for (const p of board_cohort) {
+    const slug = p.slug;
+    const cat = p.category || 'Unknown';
+    const age_y = p.listed_at !== null ? ageDays(asOf, p.listed_at)! / 365.25 : median_age_yr_non_cex;
+    const tvl = p.tvl_usd || 1.0;
+    const is_s = isService(p);
+    const [d1, d2, d3] = computeGates(p);
+
+    const pi_base = model_b_full.pi_hat_c[cat] ?? model_b_full.p0_asym;
+    const mult = (kept_b_use_svc && is_s) ? model_b_full.d_service : 1.0;
+    const pi = clip(pi_base * mult, 0.01, 0.95);
+
+    const x_lat = [1.0];
+    for (const f of kept_b_lat_feats) {
+      if (f === 'age_yr') x_lat.push(age_y);
+      else if (f === 'tvl_lat') x_lat.push(Math.log(Math.max(1.0, tvl) / 1e8));
+      else if (f === 'x3') x_lat.push(calcX3(p, meds_non_cex));
+      else if (f === 'chains_lat') x_lat.push(Math.log(Math.max(1, (p.chains || []).length)));
+    }
+
+    const eta = dot(x_lat, model_b_full.gamma);
+    const F = w0_final + (1.0 - w0_final) * sigmoid(eta);
+    const S = Math.max(0.15, 1.0 - F);
+    const odds_raw = clip((pi * S) / (pi * S + (1.0 - pi)), 0.01, 0.95);
+    const p_odds = odds_raw * d1 * d2 * d3;
+    board_odds.set(slug, [p_odds, d1, d2, d3, pi, F, S]);
+  }
+
+  // 200 Bootstrap Refits
+  const rng = new Mulberry32(20261114);
+  const boot_betas_a: number[][] = [];
+  const boot_betas_b: number[][] = [];
+  const boot_cat_offsets = new Map<string, number[]>();
+  const board_rank_history = new Map<string, number[]>();
+  for (const p of board_cohort) board_rank_history.set(p.slug, []);
+
+  for (let b_idx = 0; b_idx < 200; b_idx++) {
+    // 1. Resample L_match
+    const sample_a = Array.from({ length: N_match }, () => L_match[Math.floor(rng.next() * N_match)]!);
+    const meds_boot_a = computeChainMedians(sample_a);
+    const X_sa = sample_a.map((p) => [1.0, ...kept_a_feats.map((f) => f === 'x3' ? calcX3(p, meds_boot_a) : p[f])]);
+    const y_sa = sample_a.map((p) => p.z);
+    const b_fit_a = huberIrls(X_sa, y_sa);
+    boot_betas_a.push(b_fit_a);
+    const resids_ba = sample_a.map((p, i) => y_sa[i]! - dot(X_sa[i]!, b_fit_a));
+    const med_r_boot = median(resids_ba);
+
+    // 2. Resample NON_CEX
+    const sample_b = Array.from({ length: N_b }, () => NON_CEX[Math.floor(rng.next() * N_b)]!);
+    const meds_boot_b = computeChainMedians(sample_b);
+    const model_boot_b = fitCure(sample_b, kept_b_lat_feats, kept_b_use_cat, kept_b_use_svc, lam_final, m_shr_final, w0_final, meds_boot_b);
+    boot_betas_b.push(model_boot_b.gamma);
+    const pi_hat_boot = model_boot_b.pi_hat_c;
+    const p0_asym_boot = model_boot_b.p0_asym;
+    const d_svc_boot = model_boot_b.d_service;
+
+    for (const [c, off] of Object.entries(pi_hat_boot)) {
+      let l = boot_cat_offsets.get(c);
+      if (!l) {
+        l = [];
+        boot_cat_offsets.set(c, l);
+      }
+      l.push(off);
+    }
+
+    // 3. Repredict board and rerank
+    const scored: [number, string][] = [];
+    for (const p of board_cohort) {
+      const slug = p.slug;
+      const tvl = p.tvl_usd;
+      const x_tvl = Math.log(tvl / 1e8);
+      const f_a = kept_a_feats.map((f) => f === 'x3' ? calcX3(p, meds_boot_a) : (f === 'x_tvl' ? x_tvl : p[f]));
+      const zh = b_fit_a[0]! + dot(b_fit_a.slice(1), f_a);
+      const v50_b = tvl * Math.exp(zh + med_r_boot);
+
+      const cat = p.category || 'Unknown';
+      const age_y = p.listed_at !== null ? ageDays(asOf, p.listed_at)! / 365.25 : median_age_yr_non_cex;
+      const is_s = isService(p);
+      const [d1, d2, d3] = computeGates(p);
+
+      const pi_b = clip((pi_hat_boot[cat] ?? p0_asym_boot) * ((kept_b_use_svc && is_s) ? d_svc_boot : 1.0), 0.01, 0.95);
+      const x_lat = [1.0];
+      for (const f of kept_b_lat_feats) {
+        if (f === 'age_yr') x_lat.push(age_y);
+        else if (f === 'tvl_lat') x_lat.push(Math.log(Math.max(1.0, tvl) / 1e8));
+        else if (f === 'x3') x_lat.push(calcX3(p, meds_boot_b));
+        else if (f === 'chains_lat') x_lat.push(Math.log(Math.max(1, (p.chains || []).length)));
+      }
+
+      const eta_b = dot(x_lat, model_boot_b.gamma);
+      const F_b = w0_final + (1.0 - w0_final) * sigmoid(eta_b);
+      const S_b = Math.max(0.15, 1.0 - F_b);
+      const raw_b = clip((pi_b * S_b) / (pi_b * S_b + (1.0 - pi_b)), 0.01, 0.95);
+      const p_odds_b = raw_b * d1 * d2 * d3;
+      const imp_b = Math.max(1, roundJs(p_odds_b * v50_b));
+      scored.push([imp_b, slug]);
+    }
+
+    scored.sort((a, b) => b[0] - a[0] || cmpStr(a[1], b[1]));
+    for (let rank_pos = 1; rank_pos <= scored.length; rank_pos++) {
+      const slug = scored[rank_pos - 1]![1];
+      board_rank_history.get(slug)!.push(rank_pos);
+    }
+  }
+
+  // SEs
+  const boot_se_a: Record<string, number> = {};
+  const param_names_a = ['beta0', ...kept_a_feats.map((f) => `beta_${f}`)];
+  for (let j = 0; j < param_names_a.length; j++) {
+    const vals = boot_betas_a.map((b) => b[j]!);
+    const mean_v = vals.reduce((a, b) => a + b, 0.0) / vals.length;
+    const se = Math.sqrt(vals.reduce((a, b) => a + (b - mean_v) ** 2, 0.0) / (vals.length - 1));
+    boot_se_a[param_names_a[j]!] = se;
+  }
+
+  const boot_se_b: Record<string, number> = {};
+  const param_names_b = ['intercept', ...kept_b_lat_feats.map((f) => `beta_${f}`)];
+  for (let j = 0; j < param_names_b.length; j++) {
+    const vals = boot_betas_b.map((b) => b[j]!);
+    const mean_v = vals.reduce((a, b) => a + b, 0.0) / vals.length;
+    const se = Math.sqrt(vals.reduce((a, b) => a + (b - mean_v) ** 2, 0.0) / (vals.length - 1));
+    boot_se_b[param_names_b[j]!] = se;
+  }
+
+  const cat_spread: Record<string, { min: number; max: number; mean: number }> = {};
+  for (const [c, vals] of boot_cat_offsets.entries()) {
+    cat_spread[c] = {
+      min: Math.min(...vals),
+      max: Math.max(...vals),
+      mean: vals.reduce((a, b) => a + b, 0.0) / vals.length,
+    };
+  }
+
+  const board_rank_ranges = new Map<string, [number, number]>();
+  for (const p of board_cohort) {
+    const s = board_rank_history.get(p.slug)!.slice().sort((a, b) => a - b);
+    const r10 = roundJs(quantileSorted(s, 0.10));
+    const r90 = roundJs(quantileSorted(s, 0.90));
+    board_rank_ranges.set(p.slug, [r10, r90]);
+  }
+
+  // Stage C
+  const all_7d = protocols
+    .filter((p) => p.change_7d !== null && p.change_7d !== undefined)
+    .map((p) => p.change_7d!)
+    .sort((a, b) => a - b);
+  const p5_7d = quantileSorted(all_7d, 0.05);
+
+  const drop_share_default = 0.07;
+  const horizon_wk_default = 12;
+
+  // Comps pool for nearestComps
+  const compPool: CompPoolEntry[] = [];
+  for (const p of protocols) {
+    const mcap = p.mcap_usd ?? 0;
+    const tvl = p.tvl_usd ?? 0;
+    const cat = p.category;
+    if (
+      mcap > 0 &&
+      tvl >= 1e6 &&
+      cat !== 'CEX' &&
+      !NON_LAUNCH.has(cat || '') &&
+      !VERSIONED.test(p.name)
+    ) {
+      compPool.push({
+        slug: p.slug,
+        name: p.name,
+        category: cat,
+        macro_group: macroGroup(cat),
+        chains: p.chains ?? [],
+        tvl_usd: tvl,
+        mcap_usd: mcap,
+      });
+    }
+  }
+
+  const raw_board: any[] = [];
+  for (const p of board_cohort) {
+    const slug = p.slug;
+    const tvl = p.tvl_usd;
+    const x_tvl = Math.log(tvl / 1e8);
+    const f_a = kept_a_feats.map((f) => f === 'x3' ? calcX3(p, meds_match) : (f === 'x_tvl' ? x_tvl : p[f]));
+    const zh = beta_a_full[0]! + dot(beta_a_full.slice(1), f_a);
+
+    const v50 = tvl * Math.exp(zh + med_r_loo);
+    const v10 = tvl * Math.exp(zh + q10_loo);
+    const v25 = tvl * Math.exp(zh + q25_loo);
+    const v75 = tvl * Math.exp(zh + q75_loo);
+    const v90 = tvl * Math.exp(zh + q90_loo);
+
+    const [p_odds, d1, d2, d3, pi_val, F_val, S_val] = board_odds.get(slug)!;
+    const implied = Math.max(1, roundJs(p_odds * v50));
+    const implied_p25 = Math.max(1, roundJs(p_odds * v25));
+    const implied_p75 = Math.max(1, roundJs(p_odds * v75));
+
+    const deposit = clip(round250(0.0002 * tvl), 1000.0, 10000.0);
+    const drop = implied * drop_share_default * deposit / (tvl + deposit);
+
+    const [setup_min, weekly_min, base_tx] = blueprint(p.category);
+    const hands_on_hours = (setup_min + weekly_min * horizon_wk_default) / 60.0;
+    const tx_count = base_tx + horizon_wk_default;
+    const [exec_ch, gas, bridge] = getCheapestChain(p, tx_count);
+    const withdraw_fee = 1.00;
+    const fees = withdraw_fee + bridge + tx_count * gas;
+
+    const net = drop - fees;
+    const net_hr = net / hands_on_hours;
+    const tbill = deposit * 0.04 * horizon_wk_default / 52.0;
+
+    const be_drop_share = fees / Math.max(1e-6, implied * deposit / (tvl + deposit));
+    const be_token_odds = fees / Math.max(1e-6, v50 * drop_share_default * deposit / (tvl + deposit));
+    const exit_tvl = tvl * (1.0 + p5_7d / 100.0);
+
+    const [rank_lo, rank_hi] = board_rank_ranges.get(slug)!;
+    const gate_code = gateCodeOf(d1, d2, d3);
+
+    raw_board.push({
+      slug,
+      name: p.name,
+      category: p.category,
+      chains: p.chains || [],
+      tvl_usd: tvl,
+      change_7d: p.change_7d,
+      mcap_usd: p.mcap_usd,
+      listed_at: p.listed_at,
+      gecko_id: p.gecko_id,
+      symbol: p.symbol,
+      token_status: 'pre-token' as const,
+      age_days: ageDays(asOf, p.listed_at),
+      implied_value_usd: implied,
+      implied_p25_usd: implied_p25,
+      implied_p75_usd: implied_p75,
+      is_watchlist: watchlist.includes(slug),
+      zh,
+      v50, v10, v25, v75, v90,
+      p_odds, pi: pi_val, F: F_val, S: S_val,
+      deposit, drop, fees, net, net_hr, tbill,
+      hands_on_hours, tx_count,
+      be_drop_share, be_token_odds,
+      exit_tvl, exec_chain: exec_ch, gas, bridge,
+      gate_code, d_gates: [d1, d2, d3],
+      rank_lo, rank_hi,
+    });
+  }
+
+  raw_board.sort((a, b) => b.implied_value_usd - a.implied_value_usd || cmpStr(a.slug, b.slug));
+  for (let i = 0; i < raw_board.length; i++) {
+    raw_board[i].rank = i + 1;
+  }
+
+  const verdict_counts = { farm: 0, marginal: 0, skip: 0 };
+  for (const r of raw_board) {
+    if (r.p_odds < 0.25 || r.net <= 0.0) {
+      r.verdict = 'skip';
+    } else if (r.p_odds >= 0.45 && r.net > r.tbill && r.net_hr >= 25.0) {
+      r.verdict = 'farm';
+    } else {
+      r.verdict = 'marginal';
+    }
+    verdict_counts[r.verdict as keyof typeof verdict_counts]++;
+  }
+
+  let farm_count_at_1_25h = 0;
+  for (const r of raw_board) {
+    const net_hr_125 = r.net / 1.25;
+    if (r.p_odds >= 0.45 && r.net > r.tbill && net_hr_125 >= 25.0) {
+      farm_count_at_1_25h++;
+    }
+  }
+
+  // Protocol Accounting Ledger (10 groups)
+  const L_match_slugs = new Set(L_match.map((p) => p.slug));
+  const board_slugs = new Set(raw_board.map((r) => r.slug));
+  const below_cutoff_slugs = new Set(early_cands.slice(160).map((p) => p.slug));
+  const wl_set = new Set(watchlist);
+
+  const ledger_groups: [string, string[]][] = [
+    ['Ranked · watchlist 40', []],
+    ['Ranked · structural gate', []],
+    ['Ranked · early (<$50M)', []],
+    ['Token trades · priced comp', []],
+    ['Token recorded · no usable cap', []],
+    ['Out · CEX', []],
+    ['Out · bridge/canonical', []],
+    ['Out · liquid staking/restaking', []],
+    ['Out · versioned', []],
+    ['Below board cutoff', []],
+  ];
+  const ledger_map = new Map<string, string[]>(ledger_groups);
+
+  for (const p of protocols) {
+    const s = p.slug;
+    const cat = p.category || '';
+    const name = p.name || '';
+    const has_tok = !isPreToken(p);
+
+    if (board_slugs.has(s)) {
+      if (wl_set.has(s)) {
+        ledger_map.get('Ranked · watchlist 40')!.push(s);
+      } else {
+        const [d1, d2, d3] = computeGates(p);
+        if (d1 < 1.0 || d2 < 1.0 || d3 < 1.0) {
+          ledger_map.get('Ranked · structural gate')!.push(s);
+        } else {
+          ledger_map.get('Ranked · early (<$50M)')!.push(s);
+        }
+      }
+    } else if (below_cutoff_slugs.has(s)) {
+      ledger_map.get('Below board cutoff')!.push(s);
+    } else if (cat === 'CEX') {
+      ledger_map.get('Out · CEX')!.push(s);
+    } else if (cat === 'Bridge' || cat === 'Canonical Bridge') {
+      ledger_map.get('Out · bridge/canonical')!.push(s);
+    } else if (cat === 'Liquid Staking' || cat === 'Liquid Restaking' || cat === 'Restaked BTC') {
+      ledger_map.get('Out · liquid staking/restaking')!.push(s);
+    } else if (VERSIONED.test(name)) {
+      ledger_map.get('Out · versioned')!.push(s);
+    } else if (has_tok) {
+      if (L_match_slugs.has(s)) {
+        ledger_map.get('Token trades · priced comp')!.push(s);
+      } else {
+        ledger_map.get('Token recorded · no usable cap')!.push(s);
+      }
+    } else {
+      throw new Error(`Unclassified protocol: ${s}`);
+    }
+  }
+
+  const total_ledger = ledger_groups.reduce((acc, [, list]) => acc + list.length, 0);
+  if (total_ledger !== 758) {
+    throw new Error(`Assertion failed: total ledger ${total_ledger} != 758`);
+  }
+
+  // Sanity Audit
+  const top20_slugs = raw_board.slice(0, 20).map((r) => r.slug);
+  const farm_slugs = raw_board.filter((r) => r.verdict === 'farm').map((r) => r.slug);
+  const top20_set = new Set(top20_slugs);
+  const farm_set = new Set(farm_slugs);
+  const check_set = new Set([...top20_slugs, ...farm_slugs]);
+
+  const snap_slugs = new Set(protocols.map((p) => p.slug));
+  const audited_slugs = AUDIT_SLUGS.filter((s) => snap_slugs.has(s));
+
+  const audit_violations: [string, string, string][] = [];
+  for (const slug of check_set) {
+    const p = by_slug.get(slug)!;
+    const cat = p.category || '';
+    const where = (top20_set.has(slug) ? 'Top20' : '') + (farm_set.has(slug) ? '+FARM' : '');
+    if (cat === 'Risk Curators') {
+      audit_violations.push([slug, 'Risk Curators', where]);
+    }
+    if (audited_slugs.includes(slug)) {
+      audit_violations.push([slug, `audit slug ${slug}`, where]);
+    }
+  }
+
+  const rc_board = raw_board.filter((r) => r.category === 'Risk Curators');
+  const rc_skip_count = rc_board.filter((r) => r.verdict === 'skip').length;
+  const rc_non_skip = rc_board.filter((r) => r.verdict !== 'skip');
+  const rc_top50 = rc_board.filter((r) => r.rank <= 50);
+
+  let used_edge_allowance = false;
+  let edge_allowance_valid = false;
+  const edge_allowance_records: any[] = [];
+  let rc_gate_pass = false;
+  let rc_gate_detail = '';
+
+  if (rc_skip_count === rc_board.length && rc_board.length === 33) {
+    rc_gate_pass = true;
+    rc_gate_detail = `33/33 Risk Curators SKIP (${rc_skip_count}/${rc_board.length})`;
+  } else if (rc_skip_count >= 30 && rc_skip_count < rc_board.length && rc_board.length === 33) {
+    used_edge_allowance = true;
+    const tuning_match = (w0_final === 0.0 && m_shr_final === 4);
+    let all_rows_match = true;
+    for (const r of rc_non_skip) {
+      const row_match = (r.rank >= 140 && 0.25 <= r.p_odds && r.p_odds <= 0.26);
+      edge_allowance_records.push({
+        slug: r.slug,
+        rank: r.rank,
+        p_odds: r.p_odds,
+        tuned_w0: w0_final,
+        tuned_m: m_shr_final,
+        meets_conditions: row_match && tuning_match,
+      });
+      if (!row_match) all_rows_match = false;
+    }
+    edge_allowance_valid = all_rows_match && tuning_match;
+    rc_gate_pass = edge_allowance_valid;
+    rc_gate_detail = `${rc_skip_count}/33 Risk Curators SKIP (edge allowance used: valid=${edge_allowance_valid})`;
+  } else {
+    rc_gate_pass = false;
+    rc_gate_detail = `${rc_skip_count}/33 Risk Curators SKIP (fewer than 30 SKIP)`;
+  }
+
+  // Gates Evaluation
+  const final_kept_a_loo = res_a.final_loo;
+  const final_kept_a_wf = res_a.final_wf;
+  const all_slopes_stable = res_a.rows.every(
+    (row) => row[4] !== 'kept' || row[3] === null || row[3] >= 1.5,
+  );
+  const ctrl_a_rejected = res_a.rows.some(
+    (row) => row[0].includes('control') && row[4].includes('rejected'),
+  );
+  const cov_80_wf_pct = cov_80_wf * 100.0;
+  const g1_pass =
+    final_kept_a_loo < 3.40 &&
+    final_kept_a_wf < 2.70 &&
+    all_slopes_stable &&
+    ctrl_a_rejected &&
+    cov_80_wf_pct >= 70.0 &&
+    cov_80_wf_pct <= 90.0;
+  const g1_detail = `LOO ×${final_kept_a_loo.toFixed(4)} < ×3.40 AND WF ×${final_kept_a_wf.toFixed(4)} < ×2.70 AND slopes stable (${all_slopes_stable}) AND control rejected (${ctrl_a_rejected}) AND WF coverage ${cov_80_wf_pct.toFixed(1)}% in [70%, 90%]`;
+
+  const kept_b_rows = stage_b_results.filter((r) => r.status === 'kept');
+  const final_kept_b = kept_b_rows[kept_b_rows.length - 1]!;
+  const final_kept_b_10f = final_kept_b.b10;
+  const final_kept_b_wf = final_kept_b.bwf;
+  const baseline_b_wf = stage_b_results[0]!.bwf;
+  const wf_margin = baseline_b_wf - final_kept_b_wf;
+  const ctrl_b_rejected = stage_b_results.some(
+    (row) => row.name.includes('control') && row.status.includes('rejected'),
+  );
+  const g2_pass =
+    final_kept_b_10f < 0.200 &&
+    final_kept_b_wf < 0.220 &&
+    wf_margin >= 0.060 &&
+    ctrl_b_rejected;
+  const g2_detail = `10-fold ${final_kept_b_10f.toFixed(4)} < 0.200 AND WF ${final_kept_b_wf.toFixed(4)} < 0.220 AND beats baseline by ${wf_margin.toFixed(4)} >= 0.060 (baseline ${baseline_b_wf.toFixed(4)}) AND control rejected (${ctrl_b_rejected})`;
+
+  const g3_pass = audit_violations.length === 0 && rc_top50.length === 0 && rc_gate_pass;
+  const g3_detail = `0 violations in Top 20 or FARM (${audit_violations.length}) AND 0 Risk Curators in Top 50 (${rc_top50.length}) AND ${rc_gate_detail}`;
+
+  const farm_econ_pass = raw_board
+    .filter((r) => r.verdict === 'farm')
+    .every((r) => r.net > r.tbill && r.net_hr >= 25.0);
+  const g4_pass = farm_slugs.length >= 12 && farm_slugs.length <= 28 && farm_econ_pass && total_ledger === 758;
+  const g4_detail = `${farm_slugs.length} clean FARM rows inside [12, 28] AND 100% Net > T-bill & Net/hr >= $25 (${farm_econ_pass}) AND ledger ${total_ledger}/758`;
+
+  const all_gates_pass = g1_pass && g2_pass && g3_pass && g4_pass;
+
+  process.stdout.write('\n' + '='.repeat(70) + '\n');
+  process.stdout.write('STEP 0 GATE VERIFICATION SUMMARY (Neon radar-5.2)\n');
+  process.stdout.write('='.repeat(70) + '\n');
+  process.stdout.write(`[${g1_pass ? 'PASS' : 'FAIL'}] Gate (i)   Stage A accuracy & stability: ${g1_detail}\n`);
+  process.stdout.write(`[${g2_pass ? 'PASS' : 'FAIL'}] Gate (ii)  Stage B calibration: ${g2_detail}\n`);
+  process.stdout.write(`[${g3_pass ? 'PASS' : 'FAIL'}] Gate (iii) False Positives: ${g3_detail}\n`);
+  process.stdout.write(`[${g4_pass ? 'PASS' : 'FAIL'}] Gate (iv)  FARM Economics: ${g4_detail}\n`);
+  process.stdout.write('='.repeat(70) + '\n');
+
+  if (!all_gates_pass) {
+    throw new Error('STEP 0 GATES FAILED');
+  }
+
+  // Construct BoardRow and RadarRow items
+  const boardRows: BoardRow[] = [];
+  const radarRows: RadarRow[] = [];
+
+  for (const r of raw_board) {
+    const p = by_slug.get(r.slug)!;
+    const comps = nearestComps(
+      {
+        slug: p.slug,
+        category: p.category,
+        macro_group: macroGroup(p.category),
+        chains: p.chains ?? [],
+        tvl_usd: p.tvl_usd,
+      },
+      compPool,
+    );
+
+    const rRoi: RoiResult = {
+      exec_chain: r.exec_chain,
+      total_min: Math.round(r.hands_on_hours * 60),
+      y_airdrop_ann: 0,
+      gross_hold: 0,
+      c_hard: r.fees,
+      k_min: r.deposit,
+      net_cash_ev_10k: r.net,
+      alpha_circ: 0.07,
+      hold_days: 84,
+      gas_per_tx: r.gas,
+      bridge_usd: r.bridge,
+      tx_count: r.tx_count,
+    };
+    const steps = farmSteps(p, r.verdict === 'skip' ? 'skip' : 'farm', rRoi).map(stepText);
+
+    boardRows.push({
+      rank: r.rank,
+      slug: r.slug,
+      name: r.name,
+      category: r.category,
+      chains: r.chains,
+      tvl_usd: r.tvl_usd,
+      change_7d: r.change_7d !== null ? roundJs(r.change_7d * 100) / 100 : null,
+      mcap_usd: r.mcap_usd,
+      listed_at: r.listed_at,
+      gecko_id: r.gecko_id,
+      symbol: r.symbol,
+      token_status: 'pre-token',
+      age_days: r.age_days,
+      implied_value_usd: r.implied_value_usd,
+      implied_p25_usd: r.implied_p25_usd,
+      implied_p75_usd: r.implied_p75_usd,
+      is_watchlist: r.is_watchlist,
+      verdict: r.verdict,
+      model: {
+        v50: roundJs(r.v50),
+        v10: roundJs(r.v10),
+        v25: roundJs(r.v25),
+        v75: roundJs(r.v75),
+        v90: roundJs(r.v90),
+        p_launch: roundJs(r.p_odds * 10000) / 10000,
+        pi: roundJs(r.pi * 10000) / 10000,
+        F: roundJs(r.F * 10000) / 10000,
+        S: roundJs(r.S * 10000) / 10000,
+        y_hat: roundJs(r.zh * 10000) / 10000,
+        med_r: roundJs(med_r_loo * 10000) / 10000,
+        age_days: r.age_days,
+        gate_code: r.gate_code,
+        rank_lo: r.rank_lo,
+        rank_hi: r.rank_hi,
+      },
+      roi: {
+        deposit: roundJs(r.deposit * 100) / 100,
+        drop: roundJs(r.drop * 100) / 100,
+        fees: roundJs(r.fees * 100) / 100,
+        net: roundJs(r.net * 100) / 100,
+        net_hr: roundJs(r.net_hr * 100) / 100,
+        tbill: roundJs(r.tbill * 100) / 100,
+        hands_on_hours: roundJs(r.hands_on_hours * 100) / 100,
+        tx_count: r.tx_count,
+        be_drop_share: roundJs(r.be_drop_share * 10000) / 10000,
+        be_token_odds: roundJs(r.be_token_odds * 10000) / 10000,
+        exit_tvl: roundJs(r.exit_tvl * 100) / 100,
+        exec_chain: r.exec_chain,
+        gas: r.gas,
+        bridge: r.bridge,
+      },
+      farm_steps: steps,
+      nearest_comps: comps,
+    });
+
+    radarRows.push({
+      rank: r.rank,
+      slug: r.slug,
+      name: r.name,
+      category: r.category,
+      chains: r.chains,
+      tvl_usd: r.tvl_usd,
+      change_7d: r.change_7d !== null ? roundJs(r.change_7d * 100) / 100 : null,
+      age_days: r.age_days,
+      implied_value_usd: r.implied_value_usd,
+      implied_p25_usd: r.implied_p25_usd,
+      implied_p75_usd: r.implied_p75_usd,
+      v50_usd: roundJs(r.v50),
+      v10_usd: roundJs(r.v10),
+      v25_usd: roundJs(r.v25),
+      v75_usd: roundJs(r.v75),
+      v90_usd: roundJs(r.v90),
+      p_launch: roundJs(r.p_odds * 10000) / 10000,
+      pi: roundJs(r.pi * 10000) / 10000,
+      F: roundJs(r.F * 10000) / 10000,
+      S: roundJs(r.S * 10000) / 10000,
+      verdict: r.verdict,
+      is_watchlist: r.is_watchlist,
+      gate_code: r.gate_code,
+      rank_lo: r.rank_lo,
+      rank_hi: r.rank_hi,
+      deposit: roundJs(r.deposit * 100) / 100,
+      drop: roundJs(r.drop * 100) / 100,
+      fees: roundJs(r.fees * 100) / 100,
+      net: roundJs(r.net * 100) / 100,
+      net_hr: roundJs(r.net_hr * 100) / 100,
+      tbill: roundJs(r.tbill * 100) / 100,
+      hands_on_hours: roundJs(r.hands_on_hours * 100) / 100,
+      tx_count: r.tx_count,
+      be_drop_share: roundJs(r.be_drop_share * 10000) / 10000,
+      be_token_odds: roundJs(r.be_token_odds * 10000) / 10000,
+      exit_tvl: roundJs(r.exit_tvl * 100) / 100,
+      exec_chain: r.exec_chain,
+    });
+  }
+
+  const live = liveRows(snapshot);
+
+  const radarData: RadarData = {
+    as_of: asOf,
+    source: snapshot.source,
+    model_version: 'radar-5.2',
+    watchlist_size: watchlist.length,
+    board_size: raw_board.length,
+    early_size: early_cands.length,
+    live_size: live.length,
+    calibration_count: N_match,
+    rows: radarRows,
+    live,
+    validation: {
+      stage_a: {
+        match: {
+          n: N_match,
+          table: res_a.rows.map((row) => ({
+            term: row[0],
+            loo_typical_miss: row[1],
+            wf_typical_miss: row[2],
+            t_stat: row[3],
+            status: row[4],
+          })),
+          kept_feats: res_a.kept_feats,
+          kept_offset_group: res_a.kept_offset_group,
+          kept_offset_lambdas: res_a.kept_offset_lambdas,
+          final_loo: res_a.final_loo,
+          final_wf: res_a.final_wf,
+          conformal_loo: {
+            q10: q10_loo,
+            q25: q25_loo,
+            med_r: med_r_loo,
+            q75: q75_loo,
+            q90: q90_loo,
+            coverage: {
+              within_x3: cov_x3_loo,
+              coverage_p25_p75: cov_50_loo,
+              coverage_p10_p90: cov_80_loo,
+            },
+          },
+          conformal_wf: {
+            q10: q10_wf,
+            q25: q25_wf,
+            med_r: med_r_wf,
+            q75: q75_wf,
+            q90: q90_wf,
+            coverage: {
+              within_x3: cov_x3_wf,
+              coverage_p25_p75: cov_50_wf,
+              coverage_p10_p90: cov_80_wf,
+            },
+          },
+        },
+        all: {
+          n: N_all,
+          table: res_a_all.rows.map((row) => ({
+            term: row[0],
+            loo_typical_miss: row[1],
+            wf_typical_miss: row[2],
+            t_stat: row[3],
+            status: row[4],
+          })),
+        },
+        final_fit: {
+          beta: beta_a_full,
+          beta_se: boot_se_a,
+          med_r: med_r_loo,
+          q10: q10_loo,
+          q25: q25_loo,
+          q75: q75_loo,
+          q90: q90_loo,
+        },
+      },
+      stage_b: {
+        cohort: 'non_cex',
+        n_protocols: N_b,
+        ablation: stage_b_results.map((r) => ({
+          term: r.name,
+          brier_10fold: r.b10,
+          acc_10fold: r.ac10,
+          brier_wf: r.bwf,
+          acc_wf: r.acwf,
+          status: r.status,
+          cv10_mode_lambda: r.lam_10,
+          cv10_mode_m_shr: r.m_10,
+          cv10_mode_w0: r.w0_10,
+          wf_lambda: r.lam_wf,
+          wf_m_shr: r.m_wf,
+          wf_w0: r.w0_wf,
+        })),
+        kept_terms: kept_b_terms,
+        baseline_wf_brier: baseline_b_wf,
+        final_kept_wf_brier: final_kept_b_wf,
+        wf_brier_margin: wf_margin,
+        edge_allowance: {
+          used: used_edge_allowance,
+          valid: edge_allowance_valid,
+          records: edge_allowance_records,
+        },
+        final_fit: {
+          gamma: model_b_full.gamma,
+          gamma_se: boot_se_b,
+          d_service: model_b_full.d_service,
+          d_service_stats: model_b_full.d_service_stats,
+          lambda: lam_final,
+          m_shr: m_shr_final,
+          w0: w0_final,
+          p0_asym: model_b_full.p0_asym,
+          pi_hat_c: model_b_full.pi_hat_c,
+        },
+        bootstrap: {
+          n_refits: 200,
+          seed: 20261114,
+          se: boot_se_b,
+          category_offsets_spread: cat_spread,
+        },
+      },
+      gates: {
+        '(i) Stage A accuracy & stability': [g1_pass, g1_detail],
+        '(ii) Stage B calibration': [g2_pass, g2_detail],
+        '(iii) False Positives': [g3_pass, g3_detail],
+        '(iv) FARM Economics': [g4_pass, g4_detail],
+      },
+      ledger: {
+        groups: ledger_groups.map(([name, list]) => [name, list.length]),
+        total: total_ledger,
+      },
+      verdicts: {
+        counts: verdict_counts,
+        farm_count_at_1_25h,
+      },
+      audit: {
+        rc_skip: rc_skip_count,
+        rc_in_top50: rc_top50.length,
+        violations: audit_violations,
+        audited_slugs,
+      },
+    },
+  };
+
+  return { board: boardRows, radar: radarData };
+}

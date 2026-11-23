@@ -1,5 +1,5 @@
-// lib/stats.ts: Mathematical and statistical routines for radar-4.1
-// Ported 1:1 from verify-r41.py
+// lib/stats.ts: Mathematical and statistical routines for radar-5.2
+// Ported 1:1 from verify-r5.py
 
 export function solveLinear(A: number[][], b: number[]): number[] {
   const n = A.length;
@@ -41,6 +41,168 @@ export function dot(x: number[], beta: number[]): number {
   return s;
 }
 
+export function wls(X: number[][], y: number[], w?: number[]): number[] {
+  const p = X[0]!.length;
+  const XtX: number[][] = Array.from({ length: p }, () => new Array(p).fill(0.0));
+  const Xty: number[] = new Array(p).fill(0.0);
+  for (let i = 0; i < X.length; i++) {
+    const xi = X[i]!;
+    const yi = y[i]!;
+    const wi = w === undefined ? 1.0 : w[i]!;
+    for (let a = 0; a < p; a++) {
+      Xty[a]! += wi * xi[a]! * yi;
+      for (let b = 0; b < p; b++) {
+        XtX[a]![b]! += wi * xi[a]! * xi[b]!;
+      }
+    }
+  }
+  return solveLinear(XtX, Xty);
+}
+
+export function roundJs(x: number): number {
+  return x >= 0 ? Math.floor(x + 0.5) : Math.ceil(x - 0.5);
+}
+
+export function round250(val: number): number {
+  return roundJs(val / 250.0) * 250.0;
+}
+
+export function clip(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+export function median(v: number[]): number {
+  if (v.length === 0) return 0.0;
+  const s = v.slice().sort((a, b) => a - b);
+  const n = s.length;
+  return n % 2 === 1 ? s[Math.floor(n / 2)]! : (s[n / 2 - 1]! + s[n / 2]!) / 2.0;
+}
+
+export function quantileSorted(s: number[], q: number): number {
+  if (s.length === 0) return 0.0;
+  const pos = q * (s.length - 1);
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  if (lo === hi) return s[pos]!;
+  return s[lo]! * (hi - pos) + s[hi]! * (pos - lo);
+}
+
+export function huberIrls(
+  X: number[][],
+  y: number[],
+  delta: number = 0.75,
+  iters: number = 20,
+): number[] {
+  let beta = wls(X, y);
+  for (let iter = 0; iter < iters; iter++) {
+    const r = X.map((xi, i) => y[i]! - dot(xi, beta));
+    const med = median(r);
+    const mad = median(r.map((v) => Math.abs(v - med)));
+    const sigma = Math.max(1.4826 * mad, 1e-9);
+    const thr = delta * sigma;
+    const w = r.map((ri) => (Math.abs(ri) <= thr ? 1.0 : thr / Math.abs(ri)));
+    beta = wls(X, y, w);
+  }
+  return beta;
+}
+
+export function sigmoid(x: number): number {
+  if (x > 35) return 1.0 - 1e-15;
+  if (x < -35) return 1e-15;
+  return 1.0 / (1.0 + Math.exp(-x));
+}
+
+export function weightedLogisticIrls(
+  X: number[][],
+  y: number[],
+  weights: number[],
+  lam: number = 0.5,
+  iters: number = 12,
+): number[] {
+  const p = X[0]!.length;
+  const n = X.length;
+  let beta = new Array(p).fill(0.0);
+  let sumW = 0.0;
+  let sumWy = 0.0;
+  for (let i = 0; i < n; i++) {
+    sumW += weights[i]!;
+    sumWy += weights[i]! * y[i]!;
+  }
+  const yMean = Math.max(1e-4, Math.min(1.0 - 1e-4, sumWy / Math.max(1e-6, sumW)));
+  beta[0] = Math.log(yMean / (1.0 - yMean));
+  for (let iter = 0; iter < iters; iter++) {
+    const eta = X.map((xi) => dot(xi, beta));
+    const mu = eta.map((e) => sigmoid(e));
+    const W = mu.map((m, i) => Math.max(1e-6, weights[i]! * m * (1.0 - m)));
+    const XtX: number[][] = Array.from({ length: p }, () => new Array(p).fill(0.0));
+    const Xtz = new Array(p).fill(0.0);
+    for (let i = 0; i < n; i++) {
+      const xi = X[i]!;
+      const yi = y[i]!;
+      const m = mu[i]!;
+      const w = weights[i]!;
+      const wi = W[i]!;
+      const num = wi * dot(xi, beta) + w * (yi - m);
+      for (let a = 0; a < p; a++) {
+        Xtz[a]! += xi[a]! * num;
+        for (let b = 0; b < p; b++) {
+          XtX[a]![b]! += wi * xi[a]! * xi[b]!;
+        }
+      }
+    }
+    for (let a = 1; a < p; a++) {
+      XtX[a]![a]! += lam;
+    }
+    beta = solveLinear(XtX, Xtz);
+  }
+  return beta;
+}
+
+export function brierScore(labels: number[], scores: number[]): number {
+  if (labels.length === 0) return 0.0;
+  let tot = 0.0;
+  for (let i = 0; i < labels.length; i++) {
+    tot += (scores[i]! - labels[i]!) ** 2;
+  }
+  return tot / labels.length;
+}
+
+export function accScore(labels: number[], scores: number[]): number {
+  if (labels.length === 0) return 0.0;
+  let count = 0;
+  for (let i = 0; i < labels.length; i++) {
+    if ((scores[i]! >= 0.5 ? 1 : 0) === labels[i]!) {
+      count++;
+    }
+  }
+  return count / labels.length;
+}
+
+export function logLoss(labels: number[], scores: number[]): number {
+  if (labels.length === 0) return 0.0;
+  let tot = 0.0;
+  for (let i = 0; i < labels.length; i++) {
+    const s = clip(scores[i]!, 1e-6, 1.0 - 1e-6);
+    const l = labels[i]!;
+    tot += -(l * Math.log(s) + (1.0 - l) * Math.log(1.0 - s));
+  }
+  return tot / labels.length;
+}
+
+export class Mulberry32 {
+  private state: number;
+  constructor(seed: number) {
+    this.state = seed >>> 0;
+  }
+  next(): number {
+    this.state = (this.state + 0x6d2b79f5) >>> 0;
+    let t = this.state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t = (t ^ (t + Math.imul(t ^ (t >>> 7), t | 61))) >>> 0;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296.0;
+  }
+}
+
 export function ridgeFit(X: number[][], y: number[], lam: number, w?: number[]): number[] {
   const p = X[0]!.length;
   const XtX: number[][] = Array.from({ length: p }, () => new Array(p).fill(0.0));
@@ -57,84 +219,9 @@ export function ridgeFit(X: number[][], y: number[], lam: number, w?: number[]):
     }
   }
   for (let a = 1; a < p; a++) {
-    XtX[a]![a]! += lam; // intercept unpenalized
+    XtX[a]![a]! += lam;
   }
   return solveLinear(XtX, Xty);
-}
-
-export function roundJs(x: number): number {
-  return Math.floor(x + 0.5);
-}
-
-export function clip(v: number, lo: number, hi: number): number {
-  return Math.max(lo, Math.min(hi, v));
-}
-
-export function median(v: number[]): number {
-  if (v.length === 0) return 0;
-  const s = v.slice().sort((a, b) => a - b);
-  const n = s.length;
-  const m = Math.floor(n / 2);
-  return n % 2 === 1 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
-}
-
-export function quantileSorted(s: number[], q: number): number {
-  if (s.length === 0) return 0.0;
-  const pos = q * (s.length - 1);
-  const lo = Math.floor(pos);
-  const hi = Math.ceil(pos);
-  if (lo === hi) {
-    return s[pos]!;
-  }
-  return s[lo]! * (hi - pos) + s[hi]! * (pos - lo);
-}
-
-export function huberIrls(
-  X: number[][],
-  y: number[],
-  lam: number,
-  delta: number = 1.35,
-  iters: number = 15,
-): number[] {
-  let beta = ridgeFit(X, y, lam);
-  for (let iter = 0; iter < iters; iter++) {
-    const r = X.map((xi, i) => y[i]! - dot(xi, beta));
-    const med = median(r);
-    const mad = median(r.map((v) => Math.abs(v - med)));
-    const sigma = Math.max(1.4826 * mad, 1e-9);
-    const thr = delta * sigma;
-    const w = r.map((ri) => (Math.abs(ri) <= thr ? 1.0 : thr / Math.abs(ri)));
-    beta = ridgeFit(X, y, lam, w);
-  }
-  return beta;
-}
-
-export function rmsle(pairs: [number, number][]): number {
-  if (pairs.length === 0) return 0.0;
-  let sumSq = 0.0;
-  for (const [y, yh] of pairs) {
-    sumSq += (yh - y) ** 2;
-  }
-  return Math.sqrt(sumSq / pairs.length);
-}
-
-export function maeLog(pairs: [number, number][]): number {
-  if (pairs.length === 0) return 0.0;
-  let sumAbs = 0.0;
-  for (const [y, yh] of pairs) {
-    sumAbs += Math.abs(yh - y);
-  }
-  return sumAbs / pairs.length;
-}
-
-export function medape(pairs: [number, number][]): number {
-  if (pairs.length === 0) return 0.0;
-  const apes = pairs
-    .map(([y, yh]) => Math.abs(Math.exp(yh) - Math.exp(y)) / Math.exp(y))
-    .sort((a, b) => a - b);
-  const n = apes.length;
-  const m = Math.floor(n / 2);
-  return n % 2 === 1 ? apes[m]! : (apes[m - 1]! + apes[m]!) / 2;
 }
 
 function computeRanks(vals: number[]): number[] {
@@ -206,6 +293,35 @@ export function ndcgTop20(actualLn: number[], pred: number[]): number {
   return id !== 0.0 ? d / id : 0.0;
 }
 
+// Backward-compatibility statistical helpers
+export function rmsle(pairs: [number, number][]): number {
+  if (pairs.length === 0) return 0.0;
+  let sumSq = 0.0;
+  for (const [y, yh] of pairs) {
+    sumSq += (yh - y) ** 2;
+  }
+  return Math.sqrt(sumSq / pairs.length);
+}
+
+export function maeLog(pairs: [number, number][]): number {
+  if (pairs.length === 0) return 0.0;
+  let sumAbs = 0.0;
+  for (const [y, yh] of pairs) {
+    sumAbs += Math.abs(yh - y);
+  }
+  return sumAbs / pairs.length;
+}
+
+export function medape(pairs: [number, number][]): number {
+  if (pairs.length === 0) return 0.0;
+  const apes = pairs
+    .map(([y, yh]) => Math.abs(Math.exp(yh) - Math.exp(y)) / Math.exp(y))
+    .sort((a, b) => a - b);
+  const n = apes.length;
+  const m = Math.floor(n / 2);
+  return n % 2 === 1 ? apes[m]! : (apes[m - 1]! + apes[m]!) / 2;
+}
+
 export function aucScore(labels: number[], scores: number[]): number {
   const pos: number[] = [];
   const neg: number[] = [];
@@ -224,24 +340,4 @@ export function aucScore(labels: number[], scores: number[]): number {
     }
   }
   return wins / (pos.length * neg.length);
-}
-
-export function brierScore(labels: number[], scores: number[]): number {
-  if (labels.length === 0) return 0.0;
-  let tot = 0.0;
-  for (let i = 0; i < labels.length; i++) {
-    tot += (scores[i]! - labels[i]!) ** 2;
-  }
-  return tot / labels.length;
-}
-
-export function logLoss(labels: number[], scores: number[]): number {
-  if (labels.length === 0) return 0.0;
-  let tot = 0.0;
-  for (let i = 0; i < labels.length; i++) {
-    const s = clip(scores[i]!, 1e-6, 1 - 1e-6);
-    const l = labels[i]!;
-    tot += -(l * Math.log(s) + (1 - l) * Math.log(1 - s));
-  }
-  return tot / labels.length;
 }
