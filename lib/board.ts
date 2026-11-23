@@ -69,11 +69,12 @@ function titleCaseSlug(slug: string): string {
 }
 
 function gateCodeToInt(gc: string): number {
-  const s = gc.toLowerCase();
-  if (s.includes('parent')) return 1;
-  if (s.includes('chain-sub') || s.includes('chain_sub')) return 2;
-  if (s.includes('native')) return 3;
-  return 0;
+  const s = (gc || '').toLowerCase();
+  let code = 0;
+  if (s.includes('parent')) code |= 1;
+  if (s.includes('chain-sub') || s.includes('chain_sub')) code |= 2;
+  if (s.includes('native')) code |= 4;
+  return code;
 }
 
 /**
@@ -83,6 +84,11 @@ export function dataScript(radar: RadarData): string {
   // Checksum over the 200 implied values
   const checksum = computeRadarChecksum(radar.rows);
 
+  const watchlist_idx: number[] = [];
+  radar.rows.forEach((r, idx) => {
+    if (r.is_watchlist) watchlist_idx.push(idx);
+  });
+
   // Meta block
   const meta = {
     as_of: radar.as_of,
@@ -90,6 +96,7 @@ export function dataScript(radar: RadarData): string {
     checksum,
     p5_7d: -16.980155,
     watchlist_size: radar.watchlist_size,
+    watchlist_idx,
     board_size: radar.board_size,
     early_size: radar.early_size,
     live_size: radar.live_size,
@@ -217,10 +224,10 @@ export function dataScript(radar: RadarData): string {
     p0_asym: roundJs(fitB.p0_asym * 10000) / 10000,
     median_age_yr: 1.807,
     pi_hat_c: piHatEntries,
-    brier_10fold: roundJs(stageB.ablation[1]!.brier_10fold * 10000) / 10000,
+    brier_10fold: roundJs((([...stageB.ablation].reverse().find((r) => r.status === 'kept') ?? stageB.ablation[1]!).brier_10fold) * 10000) / 10000,
     brier_wf: roundJs(stageB.final_kept_wf_brier * 10000) / 10000,
     brier_base_wf: roundJs(stageB.baseline_wf_brier * 10000) / 10000,
-    acc_wf: roundJs(stageB.ablation[1]!.acc_wf * 10000) / 10000,
+    acc_wf: roundJs((([...stageB.ablation].reverse().find((r) => r.status === 'kept') ?? stageB.ablation[1]!).acc_wf) * 10000) / 10000,
     acc_base_wf: roundJs(stageB.ablation[0]!.acc_wf * 10000) / 10000,
   };
 
