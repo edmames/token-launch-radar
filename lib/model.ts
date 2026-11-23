@@ -20,13 +20,25 @@ import {
   wls,
 } from './stats.ts';
 import {
-  farmSteps,
   GAS_DEFAULT,
   GAS_TABLE,
+  blueprint,
+  farmSteps10,
+  getCheapestChain,
+  matrix3x4,
   nearestComps,
-  stepText,
+  roiFor,
+  skipSteps3,
+  STEP_TEMPLATES,
+  DEFAULT_SCENARIO,
 } from './farm.ts';
-import type { CompPoolEntry, LiveComp, RoiResult } from './farm.ts';
+import type {
+  CompPoolEntry,
+  LiveComp,
+  RoiScenarioResult,
+  FarmStep,
+  Scenario,
+} from './farm.ts';
 
 export const MODEL_VERSION = 'radar-5.2';
 export const EARLY_ROWS = 160;
@@ -225,37 +237,7 @@ export function ageDays(asOfStr: string, listedAtStr: string | null): number | n
   return Math.max(0, Math.round((t0 - t1) / (24 * 3600 * 1000)));
 }
 
-export function blueprint(cat: string | null): [number, number, number] {
-  if (
-    cat === 'Derivatives' ||
-    cat === 'Prediction Market' ||
-    cat === 'Interest Rate Derivatives'
-  ) {
-    return [105, 10, 8];
-  }
-  if (cat === 'Dexs' || cat === 'Chain') {
-    return [95, 10, 6];
-  }
-  return [85, 10, 4];
-}
-
-export function getCheapestChain(
-  p: { chains?: string[] },
-  tx: number,
-): [string, number, number] {
-  let best: [number, string, number, number] | null = null;
-  for (const ch of p.chains ?? []) {
-    const [g, b] = (GAS_TABLE as Record<string, [number, number]>)[ch] ?? GAS_DEFAULT;
-    const cost = b + tx * g;
-    if (best === null || cost < best[0]) {
-      best = [cost, ch, g, b];
-    }
-  }
-  if (best === null) {
-    return ['(none)', GAS_DEFAULT[0], GAS_DEFAULT[1]];
-  }
-  return [best[1], best[2], best[3]];
-}
+export { blueprint, getCheapestChain };
 
 export function computeChainMedians(
   cohort: { change_7d?: number | null; chains?: string[] }[],
@@ -416,16 +398,9 @@ export interface BoardRow {
     gas: number;
     bridge: number;
   };
-  farm_steps: string[];
-  nearest_comps: {
-    slug: string;
-    name: string;
-    category: string | null;
-    tvl_usd: number;
-    mcap_usd: number;
-    ratio: number;
-    distance: number;
-  }[];
+  farm_steps: FarmStep[];
+  nearest_comps: LiveComp[];
+  matrix?: number[][];
 }
 
 export interface RadarRow {
@@ -466,6 +441,7 @@ export interface RadarRow {
   be_token_odds: number;
   exit_tvl: number;
   exec_chain: string;
+  comp_idx?: number[];
 }
 
 export interface LiveRow {
@@ -489,6 +465,7 @@ export interface RadarData {
   calibration_count: number;
   rows: RadarRow[];
   live: LiveRow[];
+  comps_pool?: CompPoolEntry[];
   validation: {
     stage_a: {
       match: {
@@ -549,6 +526,7 @@ export interface RadarData {
         q75: number;
         q90: number;
       };
+      oof?: { slug: string; oof_pred: number }[];
     };
     stage_b: {
       cohort: string;
@@ -661,8 +639,9 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
       return `${r.slug} has ${steps?.length ?? 0} farm steps`;
     }
     for (const s of steps) {
-      if (s.length < 20 || s.length > 600) {
-        return `${r.slug} has a farm step of ${s.length} characters`;
+      const text = typeof s === 'string' ? s : s.text;
+      if (text.length < 20 || text.length > 600) {
+        return `${r.slug} has a farm step of ${text.length} characters`;
       }
     }
     if (!Number.isSafeInteger(r.implied_value_usd) || r.implied_value_usd <= 0) {
@@ -1030,6 +1009,7 @@ export function buildRadar(snapshot: Snapshot): {
 
   // Conformal LOO
   const loo_resids: number[] = [];
+  const loo_preds_raw: { slug: string; tvl_usd: number; zh: number }[] = [];
   for (let i = 0; i < L_match.length; i++) {
     const tr = L_match.filter((_, j) => j !== i);
     const te = L_match[i]!;
@@ -1042,6 +1022,7 @@ export function buildRadar(snapshot: Snapshot): {
     const b = huberIrls(X_tr, y_tr);
     const zh = dot(b, row_feats(te, tr_meds));
     loo_resids.push(te.z - zh);
+    loo_preds_raw.push({ slug: te.slug, tvl_usd: te.tvl_usd, zh });
   }
 
   const s_loo_resids = loo_resids.slice().sort((a, b) => a - b);
@@ -1050,6 +1031,11 @@ export function buildRadar(snapshot: Snapshot): {
   const med_r_loo = median(s_loo_resids);
   const q75_loo = quantileSorted(s_loo_resids, 0.75);
   const q90_loo = quantileSorted(s_loo_resids, 0.90);
+
+  const oof_a: { slug: string; oof_pred: number }[] = loo_preds_raw.map((p) => ({
+    slug: p.slug,
+    oof_pred: p.tvl_usd * Math.exp(p.zh + med_r_loo),
+  }));
 
   const cov_x3_loo = loo_resids.filter((r) => Math.exp(Math.abs(r)) <= 3.0).length / loo_resids.length;
   const cov_50_loo = loo_resids.filter((r) => q25_loo <= r && r <= q75_loo).length / loo_resids.length;
@@ -1707,30 +1693,38 @@ export function buildRadar(snapshot: Snapshot): {
   const drop_share_default = 0.07;
   const horizon_wk_default = 12;
 
-  // Comps pool for nearestComps
-  const compPool: CompPoolEntry[] = [];
+  // Comps pool (n=119) with oof_pred
+  const oofMap = new Map<string, number>(oof_a.map((o) => [o.slug, o.oof_pred]));
+  const cpPool: CompPoolEntry[] = [];
   for (const p of protocols) {
     const mcap = p.mcap_usd ?? 0;
     const tvl = p.tvl_usd ?? 0;
     const cat = p.category;
-    if (
-      mcap > 0 &&
-      tvl >= 1e6 &&
-      cat !== 'CEX' &&
-      !NON_LAUNCH.has(cat || '') &&
-      !VERSIONED.test(p.name)
-    ) {
-      compPool.push({
+    if (mcap > 0 && tvl >= 1e6 && cat !== 'CEX') {
+      let oof_pred: number;
+      if (oofMap.has(p.slug)) {
+        oof_pred = oofMap.get(p.slug)!;
+      } else {
+        const x_tvl = Math.log(tvl / 1e8);
+        const f_a = kept_a_feats.map((f) => (f === 'x3' ? calcX3(p, meds_match) : (f === 'x_tvl' ? x_tvl : (p as any)[f])));
+        const zh = beta_a_full[0]! + dot(beta_a_full.slice(1), f_a);
+        oof_pred = tvl * Math.exp(zh + med_r_loo);
+      }
+      cpPool.push({
         slug: p.slug,
         name: p.name,
+        symbol: p.symbol ?? null,
         category: cat,
         macro_group: macroGroup(cat),
         chains: p.chains ?? [],
         tvl_usd: tvl,
         mcap_usd: mcap,
+        g7d: p.change_7d !== null && p.change_7d !== undefined ? roundJs(p.change_7d * 100) / 100 : null,
+        oof_pred,
       });
     }
   }
+  cpPool.sort((a, b) => b.mcap_usd - a.mcap_usd || b.tvl_usd - a.tvl_usd || a.slug.localeCompare(b.slug));
 
   const raw_board: any[] = [];
   for (const p of board_cohort) {
@@ -2023,24 +2017,35 @@ export function buildRadar(snapshot: Snapshot): {
         chains: p.chains ?? [],
         tvl_usd: p.tvl_usd,
       },
-      compPool,
+      cpPool,
+      8,
     );
 
-    const rRoi: RoiResult = {
-      exec_chain: r.exec_chain,
-      total_min: Math.round(r.hands_on_hours * 60),
-      y_airdrop_ann: 0,
-      gross_hold: 0,
-      c_hard: r.fees,
-      k_min: r.deposit,
-      net_cash_ev_10k: r.net,
-      alpha_circ: 0.07,
-      hold_days: 84,
-      gas_per_tx: r.gas,
-      bridge_usd: r.bridge,
-      tx_count: r.tx_count,
+    const rowForSteps = {
+      ...r,
+      roi: {
+        deposit: r.deposit,
+        drop: r.drop,
+        fees: r.fees,
+        net: r.net,
+        net_hr: r.net_hr,
+        exit_tvl: r.exit_tvl,
+        exec_chain: r.exec_chain,
+        gas: r.gas,
+        bridge: r.bridge,
+        hands_on_hours: r.hands_on_hours,
+      },
     };
-    const steps = farmSteps(p, r.verdict === 'skip' ? 'skip' : 'farm', rRoi).map(stepText);
+
+    const steps = r.verdict === 'skip'
+      ? skipSteps3(rowForSteps, DEFAULT_SCENARIO, p5_7d)
+      : farmSteps10(rowForSteps, DEFAULT_SCENARIO, p5_7d);
+
+    const matrix = matrix3x4(
+      { implied: r.implied_value_usd, v50: r.v50, tvl: p.tvl_usd, category: p.category, chains: p.chains },
+      12,
+      p5_7d,
+    );
 
     boardRows.push({
       rank: r.rank,
@@ -2067,7 +2072,7 @@ export function buildRadar(snapshot: Snapshot): {
         v25: roundJs(r.v25),
         v75: roundJs(r.v75),
         v90: roundJs(r.v90),
-        p_launch: roundJs(r.p_odds * 10000) / 10000,
+        p_launch: roundJs(r.p_odds * 1e6) / 1e6,
         pi: roundJs(r.pi * 10000) / 10000,
         F: roundJs(r.F * 10000) / 10000,
         S: roundJs(r.S * 10000) / 10000,
@@ -2096,6 +2101,7 @@ export function buildRadar(snapshot: Snapshot): {
       },
       farm_steps: steps,
       nearest_comps: comps,
+      matrix,
     });
 
     radarRows.push({
@@ -2115,7 +2121,7 @@ export function buildRadar(snapshot: Snapshot): {
       v25_usd: roundJs(r.v25),
       v75_usd: roundJs(r.v75),
       v90_usd: roundJs(r.v90),
-      p_launch: roundJs(r.p_odds * 10000) / 10000,
+      p_launch: roundJs(r.p_odds * 1e6) / 1e6,
       pi: roundJs(r.pi * 10000) / 10000,
       F: roundJs(r.F * 10000) / 10000,
       S: roundJs(r.S * 10000) / 10000,
@@ -2136,6 +2142,7 @@ export function buildRadar(snapshot: Snapshot): {
       be_token_odds: roundJs(r.be_token_odds * 10000) / 10000,
       exit_tvl: roundJs(r.exit_tvl * 100) / 100,
       exec_chain: r.exec_chain,
+      comp_idx: comps.map((c) => cpPool.findIndex((cp) => cp.slug === c.slug)),
     });
   }
 
@@ -2147,11 +2154,12 @@ export function buildRadar(snapshot: Snapshot): {
     model_version: 'radar-5.2',
     watchlist_size: watchlist.length,
     board_size: raw_board.length,
-    early_size: early_cands.length,
+    early_size: raw_board.filter((r) => !r.is_watchlist).length,
     live_size: live.length,
     calibration_count: N_match,
     rows: radarRows,
     live,
+    comps_pool: cpPool,
     validation: {
       stage_a: {
         match: {
@@ -2212,6 +2220,7 @@ export function buildRadar(snapshot: Snapshot): {
           q75: q75_loo,
           q90: q90_loo,
         },
+        oof: oof_a,
       },
       stage_b: {
         cohort: 'non_cex',
@@ -2282,3 +2291,5 @@ export function buildRadar(snapshot: Snapshot): {
 
   return { board: boardRows, radar: radarData };
 }
+
+export { buildRadar as buildRadarBase };

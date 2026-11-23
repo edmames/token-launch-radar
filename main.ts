@@ -26,6 +26,7 @@ import {
 import {
   boardIssue,
   buildRadar,
+  computeRadarChecksum,
   dataScript,
 } from './lib/board.ts';
 import {
@@ -214,6 +215,25 @@ function main(): void {
   const { snapshot, board, radar } = loadAndScore(snapshotPath);
 
   writeOutputs(outputDir, board, radar);
+
+  const checksum = computeRadarChecksum((radar as any).rows);
+  process.stdout.write(`token radar: checksum ${checksum} (200 implied)\n`);
+
+  const dataJsBytes = statSync(join(outputDir, 'data.js')).size;
+  const appJsBytes = existsSync(join(PROJECT_ROOT, 'dashboard/app.js'))
+    ? statSync(join(PROJECT_ROOT, 'dashboard/app.js')).size
+    : 0;
+  const cssBytes = existsSync(join(PROJECT_ROOT, 'dashboard/app.css'))
+    ? statSync(join(PROJECT_ROOT, 'dashboard/app.css')).size
+    : 0;
+  const htmlBytes = existsSync(join(PROJECT_ROOT, 'dashboard/index.html'))
+    ? statSync(join(PROJECT_ROOT, 'dashboard/index.html')).size
+    : 0;
+  const totalBundleBytes = dataJsBytes + appJsBytes + cssBytes + htmlBytes;
+
+  process.stdout.write(
+    `token radar: bundle data.js ${dataJsBytes}B + app.js ${appJsBytes}B + app.css ${cssBytes}B + index.html ${htmlBytes}B = ${totalBundleBytes}B vs 65536B\n`,
+  );
 
   const copiedDashboard = copyAssets(
     join(PROJECT_ROOT, 'dashboard'),
