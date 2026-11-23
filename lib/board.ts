@@ -4,6 +4,7 @@ import {
   boardIssue,
   buildRadar,
   buildRadarBase,
+  macroGroup,
 } from './model.ts';
 import type {
   BoardRow,
@@ -100,19 +101,26 @@ export function dataScript(radar: RadarData): string {
   const stageA = radar.validation.stage_a;
   const stageB = radar.validation.stage_b;
 
-  // Meta block
+  const peerChecksum = fnv1a32(
+    radar.rows
+      .map((r) => (r.comp_idx ?? []).join(','))
+      .join(';'),
+  );
+
+  // Meta block (T3 shortened keys)
   const meta = {
-    as_of: radar.as_of,
-    model_version: 'radar-5.2',
-    checksum,
-    p5_7d: roundJs(radar.p5_7d * 1e6) / 1e6,
-    watchlist_size: radar.watchlist_size,
-    watchlist_idx,
-    board_size: radar.board_size,
-    early_size: radar.early_size,
-    calibration_count: radar.calibration_count,
-    ledTot: radar.validation.ledger.total,
-    b_n: stageB.n_protocols,
+    ao: radar.as_of,
+    mv: 'radar-5.3',
+    cs: checksum,
+    p5: roundJs(radar.p5_7d * 1e6) / 1e6,
+    ws: radar.watchlist_size,
+    wi: watchlist_idx,
+    bs: radar.board_size,
+    es: radar.early_size,
+    cc: radar.calibration_count,
+    lt: radar.validation.ledger.total,
+    bn: stageB.n_protocols,
+    pcs: peerChecksum,
   };
 
   // Categories pool
@@ -122,10 +130,21 @@ export function dataScript(radar: RadarData): string {
   const cats = Array.from(catSet).sort();
   const catMap = new Map<string, number>(cats.map((c, i) => [c, i]));
 
-  // Chains pool (only chains present in board rows)
+  // Macro-group mapping: cat index -> macro group index (0=Trading,1=Credit,2=Vaults,3=Infra)
+  const macroNames = ['Trading', 'Credit', 'Vaults', 'Infra'];
+  const cat_m = cats.map((c) => {
+    const mg = macroGroup(c);
+    const idx = macroNames.indexOf(mg);
+    return idx >= 0 ? idx : 0;
+  });
+
+  // Chains pool (all chains: board rows + comps pool)
   const chainSet = new Set<string>();
   for (const r of radar.rows) {
     for (const ch of r.chains ?? []) chainSet.add(ch);
+  }
+  for (const p of radar.comps_pool ?? []) {
+    for (const ch of p.chains ?? []) chainSet.add(ch);
   }
   const chains = Array.from(chainSet).sort();
   const chainMap = new Map<string, number>(chains.map((c, i) => [c, i]));
@@ -140,40 +159,41 @@ export function dataScript(radar: RadarData): string {
     }
   }
 
-  // Comps pool (cp: 119 entries)
+  // Comps pool (cp: 119 entries) — T1: include chainIds & tvl in thousands
   const cpPool = radar.comps_pool ?? [];
   const cp_packed = cpPool.map((p) => {
     const nameOv = p.name === titleCaseSlug(p.slug) ? '' : p.name;
+    const cpChainIds = (p.chains ?? []).map((ch) => chainMap.get(ch)).filter((id) => id !== undefined) as number[];
     return [
       p.slug,
       nameOv,
       p.symbol ?? '',
       catMap.get(p.category ?? '') ?? -1,
-      roundJs(p.tvl_usd / 10000.0),
+      roundJs(p.tvl_usd / 1000.0),
       roundJs(p.mcap_usd / 10000.0),
       roundJs(p.oof_pred / 1000.0),
+      cpChainIds,
     ];
   });
 
-  // Rows (200 tuples)
+  // Rows (200 tuples) — T1: removed compIdx (computed in browser), TVL in thousands
   const rows_packed = radar.rows.map((r) => {
     const nameOv = r.name === titleCaseSlug(r.slug) ? '' : r.name;
     const catId = catMap.get(r.category ?? '') ?? -1;
     const chainIds = (r.chains ?? []).map((ch) => chainMap.get(ch)!).filter((id) => id !== undefined);
-    const tvl10k = roundJs(r.tvl_usd / 10000.0);
+    const tvl1k = roundJs(r.tvl_usd / 1000.0);
     const g7d = r.change_7d !== null ? roundJs(r.change_7d * 100) / 100 : null;
     const ageDays = r.age_days ?? null;
     const v50 = roundJs(r.v50_usd);
     const pOdds = roundJs(r.p_launch * 1e6);
     const gateCode = gateCodeToInt(r.gate_code);
-    const compIdx = r.comp_idx ?? [];
 
     return [
       r.slug,
       nameOv,
       catId,
       chainIds,
-      tvl10k,
+      tvl1k,
       g7d,
       ageDays,
       v50,
@@ -181,11 +201,10 @@ export function dataScript(radar: RadarData): string {
       gateCode,
       r.rank_lo,
       r.rank_hi,
-      compIdx,
     ];
   });
 
-  // Fit parameters (Stage A & Stage B)
+  // Fit parameters (Stage A & Stage B) — T3 shortened keys
   const fitA = stageA.final_fit;
   const fitB = stageB.final_fit;
   const confLoo = stageA.match.conformal_loo;
@@ -199,42 +218,60 @@ export function dataScript(radar: RadarData): string {
   }
 
   const fit = {
-    beta0: roundJs(fitA.beta[0]! * 10000) / 10000,
-    beta_size: roundJs(fitA.beta[1]! * 10000) / 10000,
-    med_r: roundJs(fitA.med_r * 10000) / 10000,
+    b0: roundJs(fitA.beta[0]! * 10000) / 10000,
+    bs: roundJs(fitA.beta[1]! * 10000) / 10000,
+    mr: roundJs(fitA.med_r * 10000) / 10000,
     q10: roundJs(confLoo.q10 * 10000) / 10000,
     q25: roundJs(confLoo.q25 * 10000) / 10000,
     q75: roundJs(confLoo.q75 * 10000) / 10000,
     q90: roundJs(confLoo.q90 * 10000) / 10000,
     loo: roundJs(stageA.match.final_loo * 10000) / 10000,
     wf: roundJs(stageA.match.final_wf * 10000) / 10000,
-    loo_base: roundJs(stageA.match.table[0]!.loo_typical_miss * 10000) / 10000,
-    wf_base: roundJs(stageA.match.table[0]!.wf_typical_miss * 10000) / 10000,
-    cov_loo: {
+    lb: roundJs(stageA.match.table[0]!.loo_typical_miss * 10000) / 10000,
+    wb: roundJs(stageA.match.table[0]!.wf_typical_miss * 10000) / 10000,
+    cl: {
       x3: roundJs(confLoo.coverage.within_x3 * 10000) / 10000,
       p50: roundJs(confLoo.coverage.coverage_p25_p75 * 10000) / 10000,
       p80: roundJs(confLoo.coverage.coverage_p10_p90 * 10000) / 10000,
     },
-    cov_wf: {
+    cw: {
       x3: roundJs(confWf.coverage.within_x3 * 10000) / 10000,
       p50: roundJs(confWf.coverage.coverage_p25_p75 * 10000) / 10000,
       p80: roundJs(confWf.coverage.coverage_p10_p90 * 10000) / 10000,
     },
-    gamma: fitB.gamma.map((x) => roundJs(x * 10000) / 10000),
-    d_service: roundJs(fitB.d_service * 10000) / 10000,
+    gm: fitB.gamma.map((x) => roundJs(x * 10000) / 10000),
+    ds: roundJs(fitB.d_service * 10000) / 10000,
     w0: fitB.w0,
-    p0_asym: roundJs(fitB.p0_asym * 10000) / 10000,
-    median_age_yr: roundJs(radar.median_age_yr * 1000) / 1000,
-    pi_hat_c: piHatEntries,
-    brier_wf: roundJs(stageB.final_kept_wf_brier * 10000) / 10000,
-    brier_base_wf: roundJs(stageB.baseline_wf_brier * 10000) / 10000,
-    acc_wf: roundJs((([...stageB.ablation].reverse().find((r) => r.status === 'kept') ?? stageB.ablation[1]!).acc_wf) * 10000) / 10000,
-    acc_base_wf: roundJs(stageB.ablation[0]!.acc_wf * 10000) / 10000,
+    p0: roundJs(fitB.p0_asym * 10000) / 10000,
+    ma: roundJs(radar.median_age_yr * 1000) / 1000,
+    pi: piHatEntries,
+    bw: roundJs(stageB.final_kept_wf_brier * 10000) / 10000,
+    bbw: roundJs(stageB.baseline_wf_brier * 10000) / 10000,
+    aw: roundJs((([...stageB.ablation].reverse().find((r) => r.status === 'kept') ?? stageB.ablation[1]!).acc_wf) * 10000) / 10000,
+    abw: roundJs(stageB.ablation[0]!.acc_wf * 10000) / 10000,
   };
 
-  // Validation summary
-  const termsA = stageA.match.table.map((r) => r.term);
-  const termsB = stageB.ablation.map((r) => r.term);
+  // Validation summary — T3 shortened keys
+  const termsA = [
+    '1. Flat median (baseline)',
+    '2. + size curve, ln(TVL)',
+    '3. + family effect',
+    '4. + category effect',
+    '5. + 7-day TVL growth',
+    '6. + age, ln(days)',
+    '7. + chain count',
+    '8. + control: adjacent',
+  ];
+  const termsB = [
+    '1. Base rate (baseline)',
+    '2. + age, years',
+    '3. + category',
+    '4. + size curve in latency',
+    '5. + 7d growth in latency',
+    '6. + isService (D_service)',
+    '7. + chain count in latency',
+    '8. + control: adjacent',
+  ];
 
   const ablA = stageA.match.table.map((r, i) => [
     i,
@@ -254,25 +291,26 @@ export function dataScript(radar: RadarData): string {
   ]);
 
   const val = {
-    terms_a: termsA,
-    terms_b: termsB,
-    abl_a: ablA,
-    abl_b: ablB,
-    se_a: [
+    ta: termsA,
+    tb: termsB,
+    aa: ablA,
+    ab: ablB,
+    sa: [
       roundJs((fitA.beta_se?.beta0 ?? 0) * 10000) / 10000,
       roundJs((fitA.beta_se?.beta_x_tvl ?? 0) * 10000) / 10000,
     ],
-    se_b: [
+    sb: [
       roundJs((stageB.final_fit.gamma_se?.intercept ?? 0) * 10000) / 10000,
       roundJs((stageB.final_fit.gamma_se?.beta_age_yr ?? 0) * 10000) / 10000,
       roundJs((stageB.final_fit.gamma_se?.beta_tvl_lat ?? 0) * 10000) / 10000,
     ],
-    ledger: radar.validation.ledger.groups,
+    lg: radar.validation.ledger.groups,
   };
 
   const packed = {
     meta,
     cats,
+    cat_m,
     chains,
     gas,
     fit,
@@ -282,5 +320,5 @@ export function dataScript(radar: RadarData): string {
     steps: STEP_TEMPLATES,
   };
 
-  return `window.RADAR=(function(){return ${JSON.stringify(packed)};})();\n`;
+  return `window.RADAR=${JSON.stringify(packed)};\n`;
 }

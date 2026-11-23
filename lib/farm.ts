@@ -305,21 +305,21 @@ export interface FarmStep {
 
 export const STEP_TEMPLATES = {
   farm: [
-    'Configure dedicated Web3 wallet and ensure RPC endpoints are active for {exec_chain}. Review {name} protocol architecture on defillama.com/protocol/{slug} before initiating interactions.',
-    'Verify smart contract deployment and canonical bridge contracts for {name} on {exec_chain}. Confirm protocol addresses match the official registry on defillama.com/protocol/{slug}.',
-    'Bridge and fund wallet on {exec_chain} with planned deposit of ${deposit} ({pct_tvl}% of {name}\'s TVL). Account for initial network bridge fee and deposit transaction gas.',
-    'Establish risk bounds for {category} protocol {name}. Set stop-loss alert if TVL drops below ${exit_tvl} (the {p5}% 7-day quantile drawdown threshold) to trigger immediate de-risking.',
-    'Deploy ${deposit} into primary {category} liquidity pool or collateral contract of {name} on {exec_chain} to establish baseline active farming balance.',
-    'Engage secondary protocol features on {name} ({category}) across {exec_chain} to maximize volume and contract interaction footprint according to {horizon}-week blueprint.',
-    'Maintain weekly cadence for {horizon} weeks on {exec_chain}: compound yields, claim reward checkpoints, and rebalance position on {name} to preserve active user qualification.',
-    'Monitor weekly protocol performance for {name}. Check defillama.com/protocol/{slug} weekly to verify TVL stays safely above ${exit_tvl} threshold ({p5}% safety line).',
-    'Log all interaction hashes, cumulative gas fees, and claimed rewards for {name} on {exec_chain} to track net returns against projected {net} ({net_hr}/hr).',
-    'At conclusion of {horizon}-week farming plan, withdraw ${deposit} plus accumulated rewards from {name} on {exec_chain}, bridge capital back, and finalize net realization.',
+    'Set up Web3 wallet with active RPC for {exec_chain}. Review {name} architecture at defillama.com/protocol/{slug}.',
+    'Verify {name} contracts on {exec_chain}. Confirm addresses match the registry at defillama.com/protocol/{slug}.',
+    'Bridge ${deposit} to {exec_chain} ({pct_tvl}% of {name} TVL). Pay bridge fee + deposit gas.',
+    'Set stop-loss for {category} protocol {name}: exit if TVL falls below ${exit_tvl} ({p5}% 7d drawdown).',
+    'Deploy ${deposit} into the primary {category} pool of {name} on {exec_chain} as baseline farming position.',
+    'Engage secondary features on {name} ({category}) via {exec_chain} to maximize interaction footprint per {horizon}-week plan.',
+    'Weekly for {horizon} weeks on {exec_chain}: compound, claim, rebalance {name} to hold active-user status.',
+    'Monitor {name} weekly via defillama.com/protocol/{slug}. Confirm TVL stays above ${exit_tvl} ({p5}% safety).',
+    'Log tx hashes, gas fees, and rewards for {name} on {exec_chain}. Track net vs projected {net} ({net_hr}/hr).',
+    'After {horizon} weeks withdraw ${deposit} + rewards from {name} on {exec_chain}, bridge back, finalize net.',
   ],
   skip: [
-    'Disqualification filter triggered for {name} on defillama.com/protocol/{slug}: {skip_reason} (P_odds = {p_odds_pct}%, Net EV = {net}). Capital deployment rejected.',
-    'Economic analysis confirms farming {name} on {exec_chain} yields negative or sub-threshold return ({net} net vs ${fees} fees). Capital should not be allocated.',
-    'Standby instruction: No capital deployed ($0 gas, $0 deposit). Add {name} to watchlist for structural governance or TVL inflection before re-evaluating.',
+    'Disqualified: {name} at defillama.com/protocol/{slug} — {skip_reason} (P_odds={p_odds_pct}%, Net EV={net}). No capital deployed.',
+    'Farming {name} on {exec_chain} yields sub-threshold return ({net} net vs ${fees} fees). Do not allocate.',
+    'Standby: $0 deployed. Add {name} to watchlist pending governance or TVL inflection before re-evaluation.',
   ],
 };
 
