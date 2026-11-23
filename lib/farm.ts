@@ -313,12 +313,12 @@ export const STEP_TEMPLATES = {
     'Engage secondary protocol features on {name} ({category}) across {exec_chain} to maximize volume and contract interaction footprint according to {horizon}-week blueprint.',
     'Maintain weekly cadence for {horizon} weeks on {exec_chain}: compound yields, claim reward checkpoints, and rebalance position on {name} to preserve active user qualification.',
     'Monitor weekly protocol performance for {name}. Check defillama.com/protocol/{slug} weekly to verify TVL stays safely above ${exit_tvl} threshold ({p5}% safety line).',
-    'Log all interaction hashes, cumulative gas fees, and claimed rewards for {name} on {exec_chain} to track net returns against projected ${net} (${net_hr}/hr).',
+    'Log all interaction hashes, cumulative gas fees, and claimed rewards for {name} on {exec_chain} to track net returns against projected {net} ({net_hr}/hr).',
     'At conclusion of {horizon}-week farming plan, withdraw ${deposit} plus accumulated rewards from {name} on {exec_chain}, bridge capital back, and finalize net realization.',
   ],
   skip: [
-    'Disqualification filter triggered for {name} on defillama.com/protocol/{slug}: {skip_reason} (P_odds = {p_odds_pct}%, Net EV = ${net}). Capital deployment rejected.',
-    'Economic analysis confirms farming {name} on {exec_chain} yields negative or sub-threshold return (${net} net vs ${fees} fees). Capital should not be allocated.',
+    'Disqualification filter triggered for {name} on defillama.com/protocol/{slug}: {skip_reason} (P_odds = {p_odds_pct}%, Net EV = {net}). Capital deployment rejected.',
+    'Economic analysis confirms farming {name} on {exec_chain} yields negative or sub-threshold return ({net} net vs ${fees} fees). Capital should not be allocated.',
     'Standby instruction: No capital deployed ($0 gas, $0 deposit). Add {name} to watchlist for structural governance or TVL inflection before re-evaluating.',
   ],
 };
@@ -326,6 +326,8 @@ export const STEP_TEMPLATES = {
 function formatUsd(x: number): string {
   return x.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
+
+function fmtSignedUsd(x:number):string{return`${x <0?'-$':'$'}${Math.abs(x).toFixed(2)}`;}
 
 export function farmSteps10(
   row: {
@@ -399,8 +401,8 @@ export function farmSteps10(
     horizon: String(horizon),
     drop: rRoi.drop.toFixed(2),
     fees: rRoi.fees.toFixed(2),
-    net: rRoi.net.toFixed(2),
-    net_hr: rRoi.net_hr.toFixed(2),
+    net: fmtSignedUsd(rRoi.net),
+    net_hr: fmtSignedUsd(rRoi.net_hr),
   };
 
   const roles: Array<FarmStep['role']> = [
@@ -488,8 +490,8 @@ export function skipSteps3(
     category: row.category ?? 'DeFi',
     drop: rRoi.drop.toFixed(2),
     fees: rRoi.fees.toFixed(2),
-    net: rRoi.net.toFixed(2),
-    net_hr: rRoi.net_hr.toFixed(2),
+    net: fmtSignedUsd(rRoi.net),
+    net_hr: fmtSignedUsd(rRoi.net_hr),
     skip_reason: skipReason,
     p_odds_pct: (pOdds * 100).toFixed(1),
   };

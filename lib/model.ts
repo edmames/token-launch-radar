@@ -1975,8 +1975,8 @@ export function buildRadar(snapshot: Snapshot): {
   const farm_econ_pass = raw_board
     .filter((r) => r.verdict === 'farm')
     .every((r) => r.net > r.tbill && r.net_hr >= 25.0);
-  const g4_pass = farm_slugs.length >= 12 && farm_slugs.length <= 28 && farm_econ_pass && total_ledger === 758;
-  const g4_detail = `${farm_slugs.length} clean FARM rows inside [12, 28] AND 100% Net > T-bill & Net/hr >= $25 (${farm_econ_pass}) AND ledger ${total_ledger}/758`;
+  const g4_pass = farm_slugs.length >= 12 && farm_slugs.length <= 28 && farm_econ_pass && total_ledger === protocols.length;
+  const g4_detail = `${farm_slugs.length} clean FARM rows inside [12, 28] AND 100% Net > T-bill & Net/hr >= $25 (${farm_econ_pass}) AND ledger ${total_ledger}/${protocols.length}`;
 
   const all_gates_pass = g1_pass && g2_pass && g3_pass && g4_pass;
 
