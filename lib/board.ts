@@ -355,7 +355,7 @@ export function dataScript(radar: RadarData): string {
     val.stage_a.match.kept_free,
     val.stage_a.match.kept_offset ? 1 : 0,
     [
-      round3(val.stage_a.match.conformal.med_r),
+      round4(val.stage_a.match.conformal.med_r),
       round3(val.stage_a.match.conformal.q10),
       round3(val.stage_a.match.conformal.q90),
       round1(val.stage_a.match.conformal.coverage_pct),
@@ -391,7 +391,7 @@ export function dataScript(radar: RadarData): string {
       val.stage_b.cure.m,
       round3(val.stage_b.cure.p0_asym)!,
     ],
-    round3(val.stage_b.d_service)!,
+    round4(val.stage_b.d_service)!,
     round3(val.verdicts.p_floor)!,
     roundJs(val.verdicts.q75_implied),
     val.verdicts.counts,

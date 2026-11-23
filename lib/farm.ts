@@ -283,7 +283,7 @@ export const FARM_STEP2_TEMPLATES: readonly string[] = [
 ];
 
 export const FARM_STEP2_META = {
-  cost: '{min} capital, {g2}',
+  cost: '{min} capital, {g2} gas',
   time: '15 min',
 };
 
