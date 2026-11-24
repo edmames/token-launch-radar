@@ -273,16 +273,14 @@ export function dataScript(radar: RadarData): string {
     '8. + control: adjacent',
   ];
 
-  const ablA = stageA.match.table.map((r, i) => [
-    i,
+  const ablA = stageA.match.table.map((r) => [
     roundJs(r.loo_typical_miss * 10000) / 10000,
     roundJs(r.wf_typical_miss * 10000) / 10000,
     r.t_stat !== null ? roundJs(r.t_stat * 100) / 100 : null,
     packStatus(r.status),
   ]);
 
-  const ablB = stageB.ablation.map((r, i) => [
-    i,
+  const ablB = stageB.ablation.map((r) => [
     roundJs(r.brier_10fold * 10000) / 10000,
     roundJs(r.brier_wf * 10000) / 10000,
     packStatus(r.status),
