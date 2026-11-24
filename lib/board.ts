@@ -284,9 +284,7 @@ export function dataScript(radar: RadarData): string {
   const ablB = stageB.ablation.map((r, i) => [
     i,
     roundJs(r.brier_10fold * 10000) / 10000,
-    roundJs(r.acc_10fold * 10000) / 10000,
     roundJs(r.brier_wf * 10000) / 10000,
-    roundJs(r.acc_wf * 10000) / 10000,
     packStatus(r.status),
   ]);
 
