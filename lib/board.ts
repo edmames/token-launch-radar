@@ -110,7 +110,7 @@ export function dataScript(radar: RadarData): string {
   // Meta block (T3 shortened keys)
   const meta = {
     ao: radar.as_of,
-    mv: 'radar-5.3',
+    mv: 'radar-5.4',
     cs: checksum,
     p5: roundJs(radar.p5_7d * 1e6) / 1e6,
     ws: radar.watchlist_size,
