@@ -1,4 +1,4 @@
-// lib/board.ts: Board engine and compact data serialization for radar-5.2
+// lib/board.ts: Board engine and compact data serialization for radar-6.0
 
 import {
   boardIssue,
@@ -110,7 +110,7 @@ export function dataScript(radar: RadarData): string {
   // Meta block (T3 shortened keys)
   const meta = {
     ao: radar.as_of,
-    mv: 'radar-5.4',
+    mv: 'radar-6.0',
     cs: checksum,
     p5: roundJs(radar.p5_7d * 1e6) / 1e6,
     ws: radar.watchlist_size,
@@ -204,18 +204,20 @@ export function dataScript(radar: RadarData): string {
     ];
   });
 
-  // Fit parameters (Stage A & Stage B) — T3 shortened keys
+  // Fit parameters (Stage A locked & Stage B Zero-Regex Logistic) — T3 shortened keys
   const fitA = stageA.final_fit;
   const fitB = stageB.final_fit;
   const confLoo = stageA.match.conformal_loo;
   const confWf = stageA.match.conformal_wf;
 
-  const piHatEntries: [number, number][] = [];
-  for (const [catName, piVal] of Object.entries(fitB.pi_hat_c ?? {})) {
+  const alphaCatEntries: [number, number][] = [];
+  for (const [catName, aVal] of Object.entries(fitB.alpha_c ?? {})) {
     if (catMap.has(catName)) {
-      piHatEntries.push([catMap.get(catName)!, roundJs(piVal * 10000) / 10000]);
+      alphaCatEntries.push([catMap.get(catName)!, roundJs(aVal * 10000) / 10000])
     }
   }
+
+  const keptLinearB = stageB.kept_terms.filter((t) => t !== 'category');
 
   const fit = {
     b0: roundJs(fitA.beta[0]! * 10000) / 10000,
@@ -226,30 +228,30 @@ export function dataScript(radar: RadarData): string {
     q75: roundJs(confLoo.q75 * 10000) / 10000,
     q90: roundJs(confLoo.q90 * 10000) / 10000,
     loo: roundJs(stageA.match.final_loo * 10000) / 10000,
-    wf: roundJs(stageA.match.final_wf * 10000) / 10000,
-    lb: roundJs(stageA.match.table[0]!.loo_typical_miss * 10000) / 10000,
-    wb: roundJs(stageA.match.table[0]!.wf_typical_miss * 10000) / 10000,
-    cl: {
-      x3: roundJs(confLoo.coverage.within_x3 * 10000) / 10000,
-      p50: roundJs(confLoo.coverage.coverage_p25_p75 * 10000) / 10000,
-      p80: roundJs(confLoo.coverage.coverage_p10_p90 * 10000) / 10000,
-    },
-    cw: {
-      x3: roundJs(confWf.coverage.within_x3 * 10000) / 10000,
-      p50: roundJs(confWf.coverage.coverage_p25_p75 * 10000) / 10000,
-      p80: roundJs(confWf.coverage.coverage_p10_p90 * 10000) / 10000,
-    },
-    gm: fitB.gamma.map((x) => roundJs(x * 10000) / 10000),
-    ds: roundJs(fitB.d_service * 10000) / 10000,
-    w0: fitB.w0,
-    p0: roundJs(fitB.p0_asym * 10000) / 10000,
-    ma: roundJs(radar.median_age_yr * 1000) / 1000,
-    pi: piHatEntries,
-    bw: roundJs(stageB.final_kept_wf_brier * 10000) / 10000,
-    bbw: roundJs(stageB.baseline_wf_brier * 10000) / 10000,
-    aw: roundJs((([...stageB.ablation].reverse().find((r) => r.status === 'kept') ?? stageB.ablation[1]!).acc_wf) * 10000) / 10000,
-    abw: roundJs(stageB.ablation[0]!.acc_wf * 10000) / 10000,
-  };
+      wf: roundJs(stageA.match.final_wf * 10000) / 10000,
+      lb: roundJs(stageA.match.table[0]!.loo_typical_miss * 10000) / 10000,
+      wb: roundJs(stageA.match.table[0]!.wf_typical_miss * 10000) / 10000,
+      cl: {
+        x3: roundJs(confLoo.coverage.within_x3 * 10000) / 10000,
+        p50: roundJs(confLoo.coverage.coverage_p25_p75 * 10000) / 10000,
+        p80: roundJs(confLoo.coverage.coverage_p10_p90 * 10000) / 10000,
+     },
+      cw: {
+        x3: roundJs(confWf.coverage.within_x3 * 10000) / 10000,
+        p50: roundJs(confWf.coverage.coverage_p25_p75 * 10000) / 10000,
+        p80: roundJs(confWf.coverage.coverage_p10_p90 * 10000) / 10000,
+     },
+      bt: fitB.beta.map((x) => roundJs(x * 10000) / 10000),
+      ac: alphaCatEntries,
+      t9: roundJs(fitB.t90 * 1000) / 1000,
+      p0: roundJs(fitB.p0_base * 10000) / 10000,
+      ma: roundJs(radar.median_age_yr * 1000) / 1000,
+      kt: stageB.kept_terms,
+      bw: roundJs(stageB.final_kept_wf_brier * 10000) / 10000,
+      bbw: roundJs(stageB.baseline_wf_brier * 10000) / 10000,
+      aw: roundJs((([...stageB.ablation].reverse().find((r) => r.status === 'kept') ?? stageB.ablation[1]!).acc_wf) * 10000) / 10000,
+      abw: roundJs(stageB.ablation[0]!.acc_wf * 10000) / 10000,
+   };
 
   // Validation summary — T3 shortened keys
   const termsA = [
@@ -262,15 +264,14 @@ export function dataScript(radar: RadarData): string {
     '7. + chain count',
     '8. + control: adjacent',
   ];
-  const termsB = [
-    '1. Base rate (base)',
-    '2. + age, years',
-    '3. + category',
-    '4. + size in latency',
-    '5. + 7d in latency',
-    '6. + isService (D_serv)',
-    '7. + chains in latency',
-    '8. + control: adjacent',
+    const termsB = [
+      '1. Base rate (base)',
+      '2. + age, years',
+      '3. + category (ridge)',
+       '4. + size, ln(TVL)',
+       '5. + 7d TVL growth',
+       '6. + chain count',
+       '7. + control: adjacent',
   ];
 
   const ablA = stageA.match.table.map((r) => [
@@ -287,20 +288,19 @@ export function dataScript(radar: RadarData): string {
   ]);
 
   const val = {
-    ta: termsA,
-    tb: termsB,
-    aa: ablA,
-    ab: ablB,
-    sa: [
-      roundJs((fitA.beta_se?.beta0 ?? 0) * 10000) / 10000,
-      roundJs((fitA.beta_se?.beta_x_tvl ?? 0) * 10000) / 10000,
+     ta: termsA,
+     tb: termsB,
+     aa: ablA,
+     ab: ablB,
+     sa: [
+       roundJs((fitA.beta_se?.beta0 ?? 0) * 10000) / 10000,
+       roundJs((fitA.beta_se?.beta_x_tvl ?? 0) * 10000) / 10000,
     ],
-    sb: [
-      roundJs((stageB.final_fit.gamma_se?.intercept ?? 0) * 10000) / 10000,
-      roundJs((stageB.final_fit.gamma_se?.beta_age_yr ?? 0) * 10000) / 10000,
-      roundJs((stageB.final_fit.gamma_se?.beta_tvl_lat ?? 0) * 10000) / 10000,
-    ],
-    lg: radar.validation.ledger.groups,
+     sb: fitB.beta.map((_, idx) => {
+       const key = idx === 0 ? 'beta0' : `beta_${keptLinearB[idx - 1]}`;
+       return roundJs((fitB.beta_se?.[key] ?? 0) * 10000) / 10000;
+    }),
+     lg: radar.validation.ledger.groups,
   };
 
   const packed = {
