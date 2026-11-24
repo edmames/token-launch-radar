@@ -253,23 +253,23 @@ export function dataScript(radar: RadarData): string {
 
   // Validation summary — T3 shortened keys
   const termsA = [
-    '1. Flat median (baseline)',
+    '1. Flat median (base)',
     '2. + size curve, ln(TVL)',
     '3. + family effect',
     '4. + category effect',
-    '5. + 7-day TVL growth',
+    '5. + 7d TVL growth',
     '6. + age, ln(days)',
     '7. + chain count',
     '8. + control: adjacent',
   ];
   const termsB = [
-    '1. Base rate (baseline)',
+    '1. Base rate (base)',
     '2. + age, years',
     '3. + category',
-    '4. + size curve in latency',
-    '5. + 7d growth in latency',
-    '6. + isService (D_service)',
-    '7. + chain count in latency',
+    '4. + size in latency',
+    '5. + 7d in latency',
+    '6. + isService (D_serv)',
+    '7. + chains in latency',
     '8. + control: adjacent',
   ];
 
